@@ -1,0 +1,8 @@
+* text=auto
+*.cs text eol=crlf diff=csharp
+*.xaml text eol=crlf
+*.csproj text eol=crlf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.md text eol=lf

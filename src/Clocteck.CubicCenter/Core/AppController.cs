@@ -1,0 +1,1413 @@
+using System.Text.Json;
+using System.Net;
+using System.Net.Http;
+using System.Net.Sockets;
+using Clocteck.CubicCenter.Models;
+using Clocteck.CubicCenter.Services;
+using Microsoft.Win32;
+
+namespace Clocteck.CubicCenter.Core;
+
+public sealed class AppController : IAsyncDisposable
+{
+    private readonly PortableSettingsStore _store = new();
+    private readonly AppLog _log = new();
+    private readonly SystemStatsService _stats = new();
+    private readonly CancellationTokenSource _lifetime = new();
+    private AppSettings _settings = new();
+    private NativeWifiService? _wifi;
+    private DeviceDiscoveryService? _discovery;
+    private ProvisioningCoordinator? _provisioning;
+    private BuiltinApiServer? _builtIn;
+    private ManagedServiceManager? _services;
+    private HoloPcMonitorConfigurator? _holoMonitor;
+    private HolopetConfigurator? _holopet;
+    private SmtcMusicConfigurator? _smtcMusic;
+    private StoreServerClient? _storeServer;
+    private GitHubStoreInstaller? _githubStoreInstaller;
+    private DeviceApiClient? _deviceApi;
+    private SerialMonitorService? _serial;
+    private Task? _statusTask;
+    private Task? _serialStatusTask;
+    private Task? _deviceAppServiceTask;
+    private string? _holoMonitorConfigKey;
+    private readonly SemaphoreSlim _holoMonitorConfigLock = new(1, 1);
+    private string? _lastHolopetConfigKey;
+    private string? _lastSmtcMusicConfigKey;
+    private string? _lastObservedDeviceAppKey;
+    private string? _currentUiLanguage;
+    private readonly HashSet<string> _manuallyStoppedServices = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _servicePolicyLock = new();
+
+    public event EventHandler<string>? BrowserRequested;
+    public event EventHandler? ExitRequested;
+
+    public Func<string, object?, Task>? SendEventAsync { get; set; }
+
+    public async Task InitializeAsync()
+    {
+        _settings = await _store.LoadAsync();
+        ConfigureBundledWorkers();
+        foreach (var device in _settings.Devices) device.Online = false;
+        _discovery = new DeviceDiscoveryService(_log);
+        _holoMonitor = new HoloPcMonitorConfigurator(_log);
+        _holopet = new HolopetConfigurator(_log);
+        _smtcMusic = new SmtcMusicConfigurator(_log);
+        _storeServer = new StoreServerClient(_log);
+        _githubStoreInstaller = new GitHubStoreInstaller(_log);
+        _deviceApi = new DeviceApiClient(_log);
+        _serial = new SerialMonitorService();
+        _serial.StatusChanged += (_, snapshot) => QueueEvent("serial.status", snapshot);
+        _serial.TextReceived += (_, chunk) => QueueEvent("serial.data", chunk);
+        try
+        {
+            _wifi = new NativeWifiService(_log);
+            _provisioning = new ProvisioningCoordinator(_wifi, _discovery, _log, _settings, SaveSettingsAsync);
+            _provisioning.StatusChanged += (_, status) => QueueEvent("provision.status", status);
+            _provisioning.OpenBrowserRequested += (_, url) => BrowserRequested?.Invoke(this, url);
+            _provisioning.DeviceFound += (_, device) =>
+            {
+                _ = RegisterProvisionedDeviceAsync(device);
+            };
+            _log.Info("Wi-Fi", "Windows WLAN 服务已就绪");
+        }
+        catch (Exception error)
+        {
+            _log.Error("Wi-Fi", error.Message);
+        }
+
+        _builtIn = new BuiltinApiServer(_log, _stats);
+        _services = new ManagedServiceManager(_settings, _builtIn, _log, SaveSettingsAsync);
+        _services.StateChanged += (_, workers) => QueueEvent("services.state", workers);
+        _log.EntryAdded += (_, entry) => QueueEvent("log.entry", entry);
+        await _services.StartAutoServicesAsync();
+        _statusTask = StatusLoopAsync(_lifetime.Token);
+        _serialStatusTask = SerialStatusLoopAsync(_lifetime.Token);
+        _deviceAppServiceTask = DeviceAppServiceLoopAsync(_lifetime.Token);
+        _ = RefreshKnownDevicesAsync();
+        _log.Info("应用", "Clocteck Cubic Center 0.1.0 已启动");
+    }
+
+    public async Task HandleCommandAsync(string json)
+    {
+        try
+        {
+            var command = JsonSerializer.Deserialize<BridgeCommand>(json, JsonOptions) ?? new BridgeCommand();
+            switch (command.Action)
+            {
+                case "app.bootstrap":
+                    await SendBootstrapAsync();
+                    break;
+                case "wifi.scan":
+                    await ScanWifiAsync();
+                    break;
+                case "provision.start":
+                    RequireProvisioning();
+                    _ = _provisioning!.BeginAsync(GetString(command, "ssid"));
+                    break;
+                case "provision.forceComplete":
+                    RequireProvisioning();
+                    _ = _provisioning!.ForceCompleteAsync();
+                    break;
+                case "provision.cancel":
+                    RequireProvisioning();
+                    _ = _provisioning!.CancelAndRestoreAsync();
+                    break;
+                case "device.discover":
+                    _ = DiscoverDeviceAsync();
+                    break;
+                case "device.openControl":
+                    await OpenControlPageAsync(GetString(command, "ip"));
+                    break;
+                case "device.connectIp":
+                    await ConnectDeviceByIpAsync(RequireString(command, "ip"));
+                    break;
+                case "device.select":
+                    await SelectDeviceAsync(RequireString(command, "ip"));
+                    break;
+                case "device.remove":
+                    await RemoveDeviceAsync(RequireString(command, "ip"));
+                    break;
+                case "device.control.refresh":
+                    await LoadDeviceControlAsync(GetString(command, "ip"));
+                    break;
+                case "device.web.open":
+                    OpenDeviceWebPage(RequireString(command, "path"), GetString(command, "ip"));
+                    break;
+                case "device.app.launch":
+                    await LaunchDeviceAppAsync(command);
+                    break;
+                case "device.app.exit":
+                    await ExitDeviceAppAsync();
+                    break;
+                case "device.store.load":
+                    await LoadDeviceStoreAsync();
+                    break;
+                case "device.store.description.open":
+                    OpenStoreDescriptionPage(RequireString(command, "url"));
+                    break;
+                case "device.store.pc.download":
+                    await DownloadPcStoreAppAsync(command);
+                    break;
+                case "device.store.pc.install":
+                    await InstallCachedPcStoreAppAsync(command);
+                    break;
+                case "device.store.install":
+                    await InstallDeviceAppAsync(command);
+                    break;
+                case "device.store.uninstall":
+                    await UninstallDeviceAppAsync(RequireString(command, "id"));
+                    break;
+                case "device.settings.save":
+                    await SaveDeviceSettingsAsync(command);
+                    break;
+                case "device.language.sync":
+                    await SyncDeviceLanguageAsync(RequireString(command, "language"));
+                    break;
+                case "device.display.wake":
+                    await WakeDeviceAsync();
+                    break;
+                case "device.alarm.test":
+                    await AlarmTestAsync();
+                    break;
+                case "device.alarm.stop":
+                    await AlarmStopAsync();
+                    break;
+                case "device.firmware.check":
+                    await CheckFirmwareAsync();
+                    break;
+                case "device.firmware.update":
+                    await StartFirmwareUpdateAsync();
+                    break;
+                case "device.fs.list":
+                    await ListDeviceFilesAsync(GetString(command, "path"));
+                    break;
+                case "device.fs.preview":
+                    await PreviewDeviceFileAsync(RequireString(command, "path"));
+                    break;
+                case "device.fs.upload.pick":
+                    await PickAndUploadDeviceFilesAsync(GetString(command, "path"), GetString(command, "mediaMode"));
+                    break;
+                case "device.fs.download":
+                    await DownloadDeviceFileAsync(RequireString(command, "path"), GetString(command, "name"));
+                    break;
+                case "device.fs.delete":
+                    await DeleteDeviceFileAsync(RequireString(command, "path"), GetString(command, "parent"));
+                    break;
+                case "device.fs.rename":
+                    await RenameDevicePathAsync(RequireString(command, "path"), RequireString(command, "newPath"), GetString(command, "parent"));
+                    break;
+                case "device.fs.mkdir":
+                    await CreateDeviceDirectoryAsync(RequireString(command, "path"), GetString(command, "parent"));
+                    break;
+                case "device.fs.paste":
+                    await PasteDevicePathAsync(
+                        RequireString(command, "sourcePath"),
+                        RequireString(command, "destinationPath"),
+                        GetBool(command, "isDirectory"),
+                        GetBool(command, "move"),
+                        GetString(command, "parent"));
+                    break;
+                case "device.lua.read":
+                    await ReadLuaCodeAsync(GetString(command, "path"));
+                    break;
+                case "device.lua.save":
+                    await SaveLuaCodeAsync(GetString(command, "path"), RequireString(command, "code"), false);
+                    break;
+                case "device.lua.run":
+                    await SaveLuaCodeAsync(GetString(command, "path"), RequireString(command, "code"), true);
+                    break;
+                case "serial.refresh":
+                    await QueueEventAsync("serial.status", RequireSerial().Refresh());
+                    break;
+                case "serial.connect":
+                    await ConnectSerialAsync(RequireString(command, "port"), GetInt(command, "baud", 115200));
+                    break;
+                case "serial.disconnect":
+                    await DisconnectSerialAsync();
+                    break;
+                case "holoMonitor.configure":
+                    _ = ConfigureHoloMonitorAsync(GetString(command, "ip"), true);
+                    break;
+                case "services.refresh":
+                    await QueueEventAsync("services.state", await RequireServices().SnapshotAsync());
+                    break;
+                case "services.start":
+                    await StartManagedServiceAsync(RequireString(command, "id"));
+                    break;
+                case "services.stop":
+                    await StopManagedServiceAsync(RequireString(command, "id"));
+                    break;
+                case "services.configure":
+                    await ConfigureWorkerAsync(RequireString(command, "id"));
+                    break;
+                case "services.autoStart":
+                    await RequireServices().SetAutoStartAsync(RequireString(command, "id"), GetBool(command, "enabled"));
+                    break;
+                case "app.exit":
+                    ExitRequested?.Invoke(this, EventArgs.Empty);
+                    break;
+                default:
+                    _log.Warn("界面", $"未知命令：{command.Action}");
+                    break;
+            }
+        }
+        catch (Exception error)
+        {
+            _log.Error("命令", error.Message);
+            await QueueEventAsync("app.error", new { message = error.Message });
+        }
+    }
+
+    private async Task SendBootstrapAsync()
+    {
+        WifiConnection? wifiConnection = null;
+        if (_wifi is not null)
+        {
+            try { wifiConnection = await _wifi.GetCurrentConnectionAsync(_lifetime.Token); } catch { }
+        }
+        var connection = ComputerNetworkService.Resolve(wifiConnection, SelectedDeviceIp);
+        await QueueEventAsync("app.bootstrap", new
+        {
+            version = "0.1.0",
+            wifiAvailable = _wifi is not null,
+            wifi = connection,
+            devices = _settings.Devices.OrderByDescending(device => device.LastSeen),
+            selectedDeviceIp = SelectedDeviceIp,
+            provision = _provisioning?.Current ?? new ProvisioningSnapshot("unavailable", "电脑没有可用的 WLAN 服务", 0),
+            services = _services is null ? [] : await _services.SnapshotAsync(),
+            stats = _stats.GetSnapshot(),
+            hardware = _builtIn?.GetHardwareSnapshot(),
+            logs = _log.Snapshot(),
+            serial = _serial?.Snapshot(),
+        });
+    }
+
+    private async Task ScanWifiAsync()
+    {
+        RequireProvisioning();
+        try
+        {
+            var networks = await _provisioning!.ScanDeviceNetworksAsync(_lifetime.Token);
+            await QueueEventAsync("wifi.networks", networks);
+        }
+        catch (Exception error)
+        {
+            _log.Error("Wi-Fi扫描", error.Message);
+            await QueueEventAsync("wifi.networks", Array.Empty<WifiNetwork>());
+        }
+    }
+
+    private async Task DiscoverDeviceAsync()
+    {
+        if (_discovery is null) return;
+        await QueueEventAsync("device.discovery", new { status = "working", message = "正在扫描局域网中的 Clocteck Cubic 设备" });
+
+        try
+        {
+            foreach (var saved in _settings.Devices) saved.Online = false;
+            var found = new List<DeviceInfo>();
+
+            var knownTasks = _settings.Devices
+                .Select(device => _discovery.ProbeAsync(device.IpAddress, _lifetime.Token, 1400))
+                .ToArray();
+            if (knownTasks.Length > 0)
+            {
+                found.AddRange((await Task.WhenAll(knownTasks)).Where(device => device is not null).Cast<DeviceInfo>());
+            }
+
+            var byName = await _discovery.FindAsync(_settings.DeviceHostname, null, TimeSpan.FromSeconds(3), _lifetime.Token);
+            if (byName is not null) found.Add(byName);
+
+            found.AddRange(await _discovery.ScanLocalSubnetsAsync(_lifetime.Token));
+            var devices = found
+                .GroupBy(device => device.IpAddress, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToArray();
+
+            foreach (var device in devices) UpsertDevice(device, false);
+            if (devices.Length > 0 && string.IsNullOrWhiteSpace(SelectedDeviceIp))
+            {
+                SelectDevice(devices[0].IpAddress);
+            }
+            await SaveSettingsAsync();
+            await SendDeviceListAsync();
+
+            if (devices.Length == 0)
+            {
+                await QueueEventAsync("device.discovery", new { status = "not-found", message = "没有发现设备，可手动输入设备 IP 连接" });
+                return;
+            }
+
+            await QueueEventAsync("device.discovery", new { status = "success", message = $"发现 {devices.Length} 台设备" });
+            var selected = SelectedDeviceIp;
+            if (!string.IsNullOrWhiteSpace(selected)) _ = SynchronizeCurrentDeviceAppAsync(selected, false);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // Application is closing.
+        }
+        catch (Exception error)
+        {
+            _log.Error("设备发现", error.Message);
+            await QueueEventAsync("device.discovery", new { status = "error", message = error.Message });
+        }
+    }
+
+    private async Task RefreshKnownDevicesAsync()
+    {
+        if (_discovery is null || _settings.Devices.Count == 0) return;
+        try
+        {
+            var tasks = _settings.Devices
+                .Select(device => _discovery.ProbeAsync(device.IpAddress, _lifetime.Token, 1800))
+                .ToArray();
+            var found = (await Task.WhenAll(tasks)).Where(device => device is not null).Cast<DeviceInfo>().ToArray();
+            foreach (var device in found) UpsertDevice(device, false);
+            await SaveSettingsAsync();
+            await SendDeviceListAsync();
+            if (found.Any(device => device.IpAddress.Equals(SelectedDeviceIp, StringComparison.OrdinalIgnoreCase)))
+                _ = SynchronizeCurrentDeviceAppAsync(SelectedDeviceIp, false);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // Application is closing.
+        }
+        catch (Exception error)
+        {
+            _log.Warn("设备发现", "刷新已保存设备失败：" + error.Message);
+        }
+    }
+
+    private async Task ConfigureHoloMonitorAsync(string? deviceHost, bool force)
+    {
+        if (_holoMonitor is null) return;
+        deviceHost = string.IsNullOrWhiteSpace(deviceHost) ? SelectedDeviceIp : deviceHost;
+        if (string.IsNullOrWhiteSpace(deviceHost))
+        {
+            await QueueEventAsync("holoMonitor.config", new { status = "error", message = "请先选择一台设备" });
+            return;
+        }
+
+        var monitorPort = _settings.Workers.FirstOrDefault(worker => worker.Id == "pc-monitor")?.Port ?? 17322;
+        var hardware = _builtIn?.GetHardwareSnapshot();
+        var routeIp = ComputerNetworkService.Resolve(null, deviceHost)?.Ipv4Address ?? string.Empty;
+        var configKey = $"{deviceHost}|{routeIp}|{monitorPort}|{hardware?.CpuName}|{hardware?.GpuName}";
+        await _holoMonitorConfigLock.WaitAsync(_lifetime.Token);
+        try
+        {
+            if (!force && string.Equals(_holoMonitorConfigKey, configKey, StringComparison.OrdinalIgnoreCase)) return;
+            await QueueEventAsync("holoMonitor.config", new
+            {
+                status = "working",
+                message = "正在识别当前电脑 IP并配置 Holo PC Monitor…",
+            });
+            var result = await _holoMonitor.ConfigureAsync(
+                deviceHost,
+                monitorPort,
+                hardware?.CpuName,
+                hardware?.GpuName,
+                _lifetime.Token);
+            if (result.Ok) _holoMonitorConfigKey = configKey;
+            await QueueEventAsync("holoMonitor.config", new
+            {
+                status = result.Ok ? "success" : "error",
+                result.Message,
+                result.DeviceIp,
+                result.ComputerIp,
+                result.Port,
+                result.Path,
+                result.DataUrl,
+            });
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // Application is closing.
+        }
+        finally
+        {
+            _holoMonitorConfigLock.Release();
+        }
+    }
+
+    private async Task EnsureCompanionForSnapshotAsync(
+        string ip,
+        JsonElement state,
+        JsonElement settings,
+        bool forceConfiguration,
+        string? requestedWeatherAddress = null,
+        string? requestedLanguage = null)
+    {
+        var appId = CurrentAppId(state);
+        var appKey = string.IsNullOrWhiteSpace(appId) ? $"{ip}:launcher" : $"{ip}:{appId}";
+        var appChanged = !string.Equals(_lastObservedDeviceAppKey, appKey, StringComparison.OrdinalIgnoreCase);
+        if (appChanged)
+        {
+            _lastObservedDeviceAppKey = appKey;
+            var newService = CompanionServiceForApp(appId);
+            if (newService is not null)
+            {
+                lock (_servicePolicyLock) _manuallyStoppedServices.Remove(newService);
+            }
+        }
+
+        var serviceId = CompanionServiceForApp(appId);
+        if (serviceId is null) return;
+        await EnsureCompanionServiceStartedAsync(appId!, appChanged || forceConfiguration);
+        lock (_servicePolicyLock)
+        {
+            if (_manuallyStoppedServices.Contains(serviceId)) return;
+        }
+
+        if (serviceId == "pc-monitor")
+        {
+            await ConfigureHoloMonitorAsync(ip, false);
+            return;
+        }
+
+        if (serviceId == "smtc-music" && _smtcMusic is not null)
+        {
+            var smtcRoute = ReadJsonText(state, "current_route_base") ?? "/smtc_music";
+            var smtcPort = _settings.Workers.FirstOrDefault(worker => worker.Id == "smtc-music")?.Port ?? 17865;
+            var smtcConfigKey = $"{ip}|{smtcRoute}|{smtcPort}";
+            if (!forceConfiguration && string.Equals(_lastSmtcMusicConfigKey, smtcConfigKey, StringComparison.Ordinal)) return;
+            var smtcResult = await _smtcMusic.ConfigureAsync(ip, smtcRoute, smtcPort, _lifetime.Token);
+            if (smtcResult.Ok) _lastSmtcMusicConfigKey = smtcConfigKey;
+            await QueueEventAsync("smtcMusic.config", new
+            {
+                status = smtcResult.Ok ? "success" : "error",
+                smtcResult.Message,
+                smtcResult.DeviceIp,
+                smtcResult.ComputerIp,
+                smtcResult.Port,
+                smtcResult.Route,
+                smtcResult.BridgeUrl,
+            });
+            return;
+        }
+
+        if (serviceId != "holopet" || _holopet is null) return;
+        var language = NormalizeLanguage(requestedLanguage) ?? _currentUiLanguage ??
+                       NormalizeLanguage(ReadJsonText(settings, "language", "locale", "lang")) ?? "zh-CN";
+        var weatherAddress = string.IsNullOrWhiteSpace(requestedWeatherAddress)
+            ? ReadJsonText(settings, "weather_address", "weatherAddress")
+            : requestedWeatherAddress.Trim();
+        var route = ReadJsonText(state, "current_route_base") ?? "/holopet";
+        var port = _settings.Workers.FirstOrDefault(worker => worker.Id == "holopet")?.Port ?? 17321;
+        var configKey = $"{ip}|{route}|{port}|{language}|{weatherAddress}";
+        if (!forceConfiguration && string.Equals(_lastHolopetConfigKey, configKey, StringComparison.Ordinal)) return;
+
+        var updates = new Dictionary<string, object?> { ["language"] = language };
+        if (!string.IsNullOrWhiteSpace(weatherAddress)) updates["weather_address"] = weatherAddress;
+        await RequireDeviceApi().SaveSettingsAsync(ip, updates, _lifetime.Token);
+
+        var result = await _holopet.ConfigureAsync(ip, route, port, _lifetime.Token);
+        if (result.Ok) _lastHolopetConfigKey = configKey;
+        await QueueEventAsync("holopet.config", new
+        {
+            status = result.Ok ? "success" : "error",
+            result.Message,
+            result.DeviceIp,
+            result.ComputerIp,
+            result.Port,
+            result.Route,
+            result.EventUrl,
+            weatherAddress,
+            language,
+        });
+    }
+
+    private async Task EnsureCompanionServiceStartedAsync(string appId, bool explicitActivation)
+    {
+        var serviceId = CompanionServiceForApp(appId);
+        if (serviceId is null) return;
+        lock (_servicePolicyLock)
+        {
+            if (explicitActivation) _manuallyStoppedServices.Remove(serviceId);
+            else if (_manuallyStoppedServices.Contains(serviceId)) return;
+        }
+        await RequireServices().StartAsync(serviceId);
+    }
+
+    private async Task StartManagedServiceAsync(string serviceId)
+    {
+        lock (_servicePolicyLock) _manuallyStoppedServices.Remove(serviceId);
+        await RequireServices().StartAsync(serviceId);
+    }
+
+    private async Task StopManagedServiceAsync(string serviceId)
+    {
+        lock (_servicePolicyLock) _manuallyStoppedServices.Add(serviceId);
+        if (serviceId.Equals("holopet", StringComparison.OrdinalIgnoreCase)) _lastHolopetConfigKey = null;
+        if (serviceId.Equals("smtc-music", StringComparison.OrdinalIgnoreCase)) _lastSmtcMusicConfigKey = null;
+        if (serviceId.Equals("pc-monitor", StringComparison.OrdinalIgnoreCase)) _holoMonitorConfigKey = null;
+        await RequireServices().StopAsync(serviceId);
+    }
+
+    private async Task SynchronizeCurrentDeviceAppAsync(string? ip, bool force)
+    {
+        if (string.IsNullOrWhiteSpace(ip) || _deviceApi is null) return;
+        try
+        {
+            var state = await _deviceApi.GetStateAsync(ip, _lifetime.Token);
+            var saved = _settings.Devices.FirstOrDefault(device => device.IpAddress.Equals(ip, StringComparison.OrdinalIgnoreCase));
+            if (saved is not null)
+            {
+                saved.Online = true;
+                saved.LastSeen = DateTimeOffset.Now;
+                UpdateDeviceRuntime(saved, state);
+                await SendDeviceListAsync();
+            }
+
+            var appKey = $"{ip}:{CurrentAppId(state) ?? "launcher"}";
+            if (!force && string.Equals(_lastObservedDeviceAppKey, appKey, StringComparison.OrdinalIgnoreCase)) return;
+            var snapshot = await _deviceApi.GetControlSnapshotAsync(ip, _lifetime.Token);
+            await EnsureCompanionForSnapshotAsync(ip, snapshot.State, snapshot.Settings, force);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException)
+        {
+            _log.Warn("应用服务", $"检查设备 {ip} 当前应用失败：{error.Message}");
+        }
+    }
+
+    private async Task DeviceAppServiceLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await SynchronizeCurrentDeviceAppAsync(SelectedDeviceIp, false);
+                await Task.Delay(4000, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception error)
+            {
+                _log.Warn("应用服务", error.Message);
+                await Task.Delay(4000, cancellationToken);
+            }
+        }
+    }
+
+    private static string? CompanionServiceForApp(string? appId) => appId?.Trim().ToLowerInvariant() switch
+    {
+        "holopet" or "holo_pet" or "clawd_monitor" => "holopet",
+        "holo_pc_monitor" or "holo-pc-monitor" => "pc-monitor",
+        "codex_buddy" or "codex-buddy" => "codex-core",
+        "desktop_mirror" or "desktop-mirror" => "desktop-mirror",
+        "smtc_music" or "smtc-music" => "smtc-music",
+        _ => null,
+    };
+
+    private void ConfigureBundledWorkers()
+    {
+        var worker = _settings.Workers.FirstOrDefault(item => item.Id.Equals("smtc-music", StringComparison.OrdinalIgnoreCase));
+        if (worker is null) return;
+        var serviceDirectory = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "smtc");
+        var bundledNode = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "node", "node.exe");
+        worker.Executable = File.Exists(bundledNode) ? bundledNode : "node.exe";
+        worker.Arguments = $"\"{Path.Combine(serviceDirectory, "smtc-bridge.js")}\"";
+        worker.WorkingDirectory = serviceDirectory;
+        worker.Port = 17865;
+        worker.HealthPath = "/health";
+        worker.AutoStart = false;
+        worker.BuiltIn = false;
+    }
+
+    private static string? CurrentAppId(JsonElement state)
+    {
+        return state.TryGetProperty("current_app", out var current) && current.ValueKind == JsonValueKind.Object &&
+               current.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String
+            ? id.GetString()
+            : null;
+    }
+
+    private static string? ReadJsonText(JsonElement source, params string[] names)
+    {
+        if (source.ValueKind != JsonValueKind.Object) return null;
+        foreach (var name in names)
+        {
+            if (!source.TryGetProperty(name, out var value)) continue;
+            var text = value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString();
+            if (!string.IsNullOrWhiteSpace(text)) return text.Trim();
+        }
+        return null;
+    }
+
+    private static string? NormalizeLanguage(string? language) => language?.Trim() switch
+    {
+        "zh-CN" => "zh-CN",
+        "zh-TW" => "zh-TW",
+        "en" => "en",
+        "ja" => "ja",
+        _ => null,
+    };
+
+    private async Task ConnectDeviceByIpAsync(string input)
+    {
+        if (_discovery is null) return;
+        if (!IPAddress.TryParse(input.Trim(), out var address) || address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            await QueueEventAsync("device.discovery", new { status = "error", message = "请输入有效的 IPv4 地址，例如 192.168.0.188" });
+            return;
+        }
+
+        var ip = address.ToString();
+        await QueueEventAsync("device.discovery", new { status = "working", message = $"正在连接 {ip}" });
+        var device = await _discovery.ProbeAsync(ip, _lifetime.Token, 3500);
+        if (device is null)
+        {
+            await QueueEventAsync("device.discovery", new { status = "not-found", message = $"{ip} 没有响应 Clocteck 设备接口" });
+            return;
+        }
+
+        await RegisterDeviceAsync(device, true, true);
+        await QueueEventAsync("device.discovery", new { status = "success", message = $"已连接设备 {ip}" });
+    }
+
+    private async Task RegisterDeviceAsync(DeviceInfo device, bool select, bool configureMonitor)
+    {
+        UpsertDevice(device, select);
+        await SaveSettingsAsync();
+        await SendDeviceListAsync();
+        await QueueEventAsync("device.found", device);
+        if (configureMonitor) await SynchronizeCurrentDeviceAppAsync(device.IpAddress, false);
+    }
+
+    private async Task RegisterProvisionedDeviceAsync(DeviceInfo device)
+    {
+        await RegisterDeviceAsync(device, true, true);
+        await OpenControlPageAsync(device.IpAddress);
+    }
+
+    private void UpsertDevice(DeviceInfo device, bool select)
+    {
+        var saved = _settings.Devices.FirstOrDefault(item =>
+            item.IpAddress.Equals(device.IpAddress, StringComparison.OrdinalIgnoreCase));
+        if (saved is null)
+        {
+            saved = new SavedDevice { IpAddress = device.IpAddress };
+            _settings.Devices.Add(saved);
+        }
+        saved.Name = "Clocteck Cubic";
+        saved.DeviceId = device.DeviceId ?? saved.DeviceId;
+        saved.LastSeen = DateTimeOffset.Now;
+        saved.Online = true;
+        if (!string.IsNullOrWhiteSpace(device.RawState))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(device.RawState);
+                UpdateDeviceRuntime(saved, document.RootElement);
+            }
+            catch (JsonException) { }
+        }
+        if (select) SelectDevice(device.IpAddress);
+    }
+
+    private async Task SelectDeviceAsync(string input)
+    {
+        if (!IPAddress.TryParse(input.Trim(), out var address) || address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            throw new ArgumentException("设备 IP 无效。");
+        }
+        var ip = address.ToString();
+        if (_settings.Devices.All(device => !device.IpAddress.Equals(ip, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException("请先连接该 IP 对应的设备。");
+        }
+        SelectDevice(ip);
+        await SaveSettingsAsync();
+        await SendDeviceListAsync();
+    }
+
+    private void SelectDevice(string ip)
+    {
+        _settings.SelectedDeviceIp = ip;
+        _settings.LastDeviceIp = ip;
+    }
+
+    private async Task RemoveDeviceAsync(string input)
+    {
+        var ip = input.Trim();
+        _settings.Devices.RemoveAll(device => device.IpAddress.Equals(ip, StringComparison.OrdinalIgnoreCase));
+        if (string.Equals(SelectedDeviceIp, ip, StringComparison.OrdinalIgnoreCase))
+        {
+            var replacement = _settings.Devices.OrderByDescending(device => device.LastSeen).FirstOrDefault()?.IpAddress;
+            _settings.SelectedDeviceIp = replacement;
+            _settings.LastDeviceIp = replacement;
+        }
+        await SaveSettingsAsync();
+        await SendDeviceListAsync();
+    }
+
+    private async Task OpenControlPageAsync(string? requestedIp)
+    {
+        if (!string.IsNullOrWhiteSpace(requestedIp)) await SelectDeviceAsync(requestedIp);
+        var ip = RequireSelectedDeviceIp();
+        await QueueEventAsync("device.control.open", new { ip });
+        await LoadDeviceControlAsync(ip);
+    }
+
+    private async Task LoadDeviceControlAsync(string? requestedIp)
+    {
+        var ip = string.IsNullOrWhiteSpace(requestedIp) ? RequireSelectedDeviceIp() : requestedIp;
+        if (_deviceApi is null) return;
+        try
+        {
+            await QueueEventAsync("device.control.status", new { status = "working", message = $"正在读取 {ip}" });
+            var snapshot = await _deviceApi.GetControlSnapshotAsync(ip, _lifetime.Token);
+            var saved = _settings.Devices.FirstOrDefault(device => device.IpAddress.Equals(ip, StringComparison.OrdinalIgnoreCase));
+            if (saved is not null)
+            {
+                saved.Online = true;
+                saved.LastSeen = DateTimeOffset.Now;
+                UpdateDeviceRuntime(saved, snapshot.State);
+                await SaveSettingsAsync();
+            }
+            await QueueEventAsync("device.control", snapshot);
+            await SendDeviceListAsync();
+            await EnsureCompanionForSnapshotAsync(ip, snapshot.State, snapshot.Settings, false);
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException)
+        {
+            var saved = _settings.Devices.FirstOrDefault(device => device.IpAddress.Equals(ip, StringComparison.OrdinalIgnoreCase));
+            if (saved is not null) saved.Online = false;
+            await QueueEventAsync("device.control.status", new { status = "error", message = $"无法连接 {ip}：{error.Message}" });
+            await SendDeviceListAsync();
+        }
+    }
+
+    private void OpenDeviceWebPage(string path, string? requestedIp)
+    {
+        var ip = string.IsNullOrWhiteSpace(requestedIp) ? RequireSelectedDeviceIp() : requestedIp;
+        path = path.Trim();
+        if (!path.StartsWith('/') || path.StartsWith("//", StringComparison.Ordinal) || path.Contains('\r') || path.Contains('\n'))
+        {
+            throw new ArgumentException("设备页面路径无效。");
+        }
+        BrowserRequested?.Invoke(this, $"http://{ip}{path}");
+    }
+
+    private async Task LaunchDeviceAppAsync(BridgeCommand command)
+    {
+        var appId = RequireString(command, "id");
+        var ip = RequireSelectedDeviceIp();
+        var requestedLanguage = NormalizeLanguage(GetString(command, "language"));
+        var requestedWeatherAddress = GetString(command, "weatherAddress")?.Trim();
+        if (requestedLanguage is not null) _currentUiLanguage = requestedLanguage;
+        await EnsureCompanionServiceStartedAsync(appId, true);
+        await QueueEventAsync("device.app.starting", new { id = appId });
+        try { await RequireDeviceApi().WakeAsync(ip, _lifetime.Token); }
+        catch (HttpRequestException) { }
+        var result = await RequireDeviceApi().LaunchAppAsync(ip, appId, _lifetime.Token);
+        var readiness = await WaitForDeviceAppPageAsync(ip, appId);
+        await QueueEventAsync("device.action", new
+        {
+            action = "launch",
+            ok = true,
+            id = appId,
+            controlReady = readiness.Ready,
+            route = readiness.Route,
+            result,
+        });
+        var state = await RequireDeviceApi().GetStateAsync(ip, _lifetime.Token);
+        var settings = (await RequireDeviceApi().GetControlSnapshotAsync(ip, _lifetime.Token)).Settings;
+        await EnsureCompanionForSnapshotAsync(ip, state, settings, true, requestedWeatherAddress, requestedLanguage);
+        await LoadDeviceControlAsync(ip);
+    }
+
+    private async Task<(bool Ready, string? Route)> WaitForDeviceAppPageAsync(string ip, string appId)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(9);
+        string? route = null;
+        while (DateTimeOffset.UtcNow < deadline && !_lifetime.IsCancellationRequested)
+        {
+            try
+            {
+                var state = await RequireDeviceApi().GetStateAsync(ip, _lifetime.Token);
+                var currentId = state.TryGetProperty("current_app", out var current) && current.ValueKind == JsonValueKind.Object &&
+                                current.TryGetProperty("id", out var id)
+                    ? id.GetString()
+                    : null;
+                if (string.Equals(currentId, appId, StringComparison.OrdinalIgnoreCase) &&
+                    state.TryGetProperty("current_route_base", out var routeNode) &&
+                    routeNode.ValueKind == JsonValueKind.String)
+                {
+                    route = routeNode.GetString();
+                    if (!string.IsNullOrWhiteSpace(route) &&
+                        await RequireDeviceApi().IsPageReadyAsync(ip, route, TimeSpan.FromMilliseconds(1300), _lifetime.Token))
+                    {
+                        return (true, route);
+                    }
+                }
+            }
+            catch (HttpRequestException) { }
+            catch (TaskCanceledException) when (!_lifetime.IsCancellationRequested) { }
+            await Task.Delay(600, _lifetime.Token);
+        }
+        return (false, route);
+    }
+
+    private async Task ExitDeviceAppAsync()
+    {
+        var ip = RequireSelectedDeviceIp();
+        var result = await RequireDeviceApi().ExitAppAsync(ip, _lifetime.Token);
+        await QueueEventAsync("device.action", new { action = "exit", ok = true, result });
+        await Task.Delay(350, _lifetime.Token);
+        await LoadDeviceControlAsync(ip);
+    }
+
+    private async Task LoadDeviceStoreAsync()
+    {
+        var ip = RequireSelectedDeviceIp();
+        await QueueEventAsync("device.store.status", new { status = "working", message = "电脑正在读取应用商店" });
+        var catalog = await RequireStoreServer().GetCatalogAsync(_lifetime.Token);
+        await QueueEventAsync("device.store", new { ip, catalog });
+        await SendPcStoreCacheAsync();
+    }
+
+    private void OpenStoreDescriptionPage(string url)
+    {
+        if (!StoreServerClient.IsTrustedStoreUri(url, "/apps/", out var uri))
+        {
+            throw new ArgumentException("应用介绍地址无效。");
+        }
+        BrowserRequested?.Invoke(this, uri.AbsoluteUri);
+    }
+
+    private async Task InstallDeviceAppAsync(BridgeCommand command)
+    {
+        var ip = RequireSelectedDeviceIp();
+        var id = RequireString(command, "id");
+        var result = await RequireDeviceApi().InstallAppAsync(
+            ip,
+            RequireString(command, "manifestUrl"),
+            id,
+            GetString(command, "name") ?? id,
+            _lifetime.Token);
+        await QueueEventAsync("device.store.status", new { status = "success", message = $"已提交安装：{id}", result });
+        await LoadDeviceControlAsync(ip);
+    }
+
+    private async Task DownloadPcStoreAppAsync(BridgeCommand command)
+    {
+        var id = RequireString(command, "id");
+        try
+        {
+            var result = await RequireGitHubStoreInstaller().DownloadAsync(
+                id,
+                RequireString(command, "version"),
+                progress => QueueEventAsync("device.store.pc-progress", progress),
+                _lifetime.Token);
+            await QueueEventAsync("device.store.status", new { status = "done", message = $"已下载到电脑：{id} {result.Version}", result });
+            await SendPcStoreCacheAsync();
+        }
+        catch (Exception error) when (error is HttpRequestException or IOException or InvalidOperationException or ArgumentException or TaskCanceledException)
+        {
+            _log.Warn("应用商店", $"PC 下载 {id} 失败：{error.Message}");
+            await QueueEventAsync("device.store.pc-progress", new
+            {
+                appId = id,
+                status = "error",
+                phase = "download",
+                percent = 0,
+                completed = 0,
+                total = 0,
+                message = $"下载失败：{error.Message}",
+            });
+        }
+    }
+
+    private async Task InstallCachedPcStoreAppAsync(BridgeCommand command)
+    {
+        var ip = RequireSelectedDeviceIp();
+        var id = RequireString(command, "id");
+        try
+        {
+            var state = await RequireDeviceApi().GetStateAsync(ip, _lifetime.Token);
+            if (string.Equals(CurrentAppId(state), id, StringComparison.OrdinalIgnoreCase))
+            {
+                await RequireDeviceApi().ExitAppAsync(ip, _lifetime.Token);
+                await Task.Delay(350, _lifetime.Token);
+            }
+
+            var result = await RequireGitHubStoreInstaller().InstallCachedAsync(
+                id,
+                RequireString(command, "version"),
+                GetString(command, "transport") ?? "fs",
+                ip,
+                RequireDeviceApi(),
+                progress => QueueEventAsync("device.store.pc-progress", progress),
+                _lifetime.Token);
+            await QueueEventAsync("device.store.status", new { status = "done", message = $"安装完成：{id} {result.Version}", result });
+            await LoadDeviceControlAsync(ip);
+        }
+        catch (Exception error) when (error is HttpRequestException or IOException or InvalidOperationException or ArgumentException or TaskCanceledException)
+        {
+            _log.Warn("应用商店", $"安装到设备 {id} 失败：{error.Message}");
+            await QueueEventAsync("device.store.pc-progress", new
+            {
+                appId = id,
+                status = "error",
+                phase = "install",
+                percent = 0,
+                completed = 0,
+                total = 0,
+                message = $"安装失败：{error.Message}",
+            });
+        }
+    }
+
+    private Task SendPcStoreCacheAsync() =>
+        QueueEventAsync("device.store.pc-cache", new { packages = RequireGitHubStoreInstaller().GetCachedPackages() });
+
+    private async Task UninstallDeviceAppAsync(string appId)
+    {
+        var ip = RequireSelectedDeviceIp();
+        var result = await RequireDeviceApi().UninstallAppAsync(ip, appId, _lifetime.Token);
+        await QueueEventAsync("device.store.status", new { status = "success", message = $"已卸载：{appId}", result });
+        await LoadDeviceControlAsync(ip);
+    }
+
+    private async Task SaveDeviceSettingsAsync(BridgeCommand command)
+    {
+        var ip = RequireSelectedDeviceIp();
+        var result = await RequireDeviceApi().SaveSettingsAsync(ip, command.Payload, _lifetime.Token);
+        await QueueEventAsync("device.settings.saved", new { ok = true, message = "设备设置已保存", result });
+        await LoadDeviceControlAsync(ip);
+    }
+
+    private async Task SyncDeviceLanguageAsync(string language)
+    {
+        language = language.Trim();
+        if (language is not ("zh-CN" or "en" or "ja" or "zh-TW"))
+        {
+            throw new ArgumentException("不支持的界面语言。");
+        }
+        _currentUiLanguage = language;
+        var ip = RequireSelectedDeviceIp();
+        var result = await RequireDeviceApi().SaveSettingsAsync(ip,
+            new Dictionary<string, object?> { ["language"] = language }, _lifetime.Token);
+        await QueueEventAsync("device.language.synced", new { ip, language, result });
+    }
+
+    private async Task WakeDeviceAsync()
+    {
+        var ip = RequireSelectedDeviceIp();
+        var result = await RequireDeviceApi().WakeAsync(ip, _lifetime.Token);
+        await QueueEventAsync("device.action", new { action = "wake", ok = true, result });
+    }
+
+    private async Task AlarmTestAsync()
+    {
+        var result = await RequireDeviceApi().TestAlarmAsync(RequireSelectedDeviceIp(), _lifetime.Token);
+        await QueueEventAsync("device.action", new { action = "alarm-test", ok = true, result });
+    }
+
+    private async Task AlarmStopAsync()
+    {
+        var result = await RequireDeviceApi().StopAlarmAsync(RequireSelectedDeviceIp(), _lifetime.Token);
+        await QueueEventAsync("device.action", new { action = "alarm-stop", ok = true, result });
+    }
+
+    private async Task CheckFirmwareAsync()
+    {
+        var result = await RequireDeviceApi().CheckFirmwareAsync(RequireSelectedDeviceIp(), _lifetime.Token);
+        await QueueEventAsync("device.firmware", new { action = "check", result });
+    }
+
+    private async Task StartFirmwareUpdateAsync()
+    {
+        var result = await RequireDeviceApi().StartFirmwareUpdateAsync(RequireSelectedDeviceIp(), _lifetime.Token);
+        await QueueEventAsync("device.firmware", new { action = "update", result });
+    }
+
+    private async Task ListDeviceFilesAsync(string? requestedPath)
+    {
+        var ip = RequireSelectedDeviceIp();
+        var path = NormalizeDeviceDirectory(requestedPath);
+        await QueueEventAsync("device.fs.status", new { status = "working", messageKey = "正在读取设备文件" });
+        var result = await RequireDeviceApi().ListFilesAsync(ip, path, _lifetime.Token);
+        await QueueEventAsync("device.fs.list", new { ip, path, result });
+    }
+
+    private async Task PreviewDeviceFileAsync(string path)
+    {
+        var bytes = await RequireDeviceApi().ReadFileAsync(RequireSelectedDeviceIp(), path, 4 * 1024 * 1024, _lifetime.Token);
+        var extension = Path.GetExtension(path).ToLowerInvariant();
+        if (ImageMimeTypes.TryGetValue(extension, out var mime))
+        {
+            await QueueEventAsync("device.fs.preview", new
+            {
+                path,
+                kind = "image",
+                content = $"data:{mime};base64,{Convert.ToBase64String(bytes)}",
+                size = bytes.Length,
+            });
+            return;
+        }
+        if (TextFileExtensions.Contains(extension))
+        {
+            await QueueEventAsync("device.fs.preview", new
+            {
+                path,
+                kind = "text",
+                content = new System.Text.UTF8Encoding(false, false).GetString(bytes),
+                size = bytes.Length,
+            });
+            return;
+        }
+        await QueueEventAsync("device.fs.preview", new { path, kind = "binary", size = bytes.Length });
+    }
+
+    private async Task PickAndUploadDeviceFilesAsync(string? requestedDirectory, string? requestedMediaMode)
+    {
+        var directory = NormalizeDeviceDirectory(requestedDirectory);
+        var mediaMode = requestedMediaMode is "crop" or "fit" ? requestedMediaMode : "original";
+        var transformMedia = IsDisplayMediaDirectory(directory) && mediaMode != "original";
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择要上传到设备的文件",
+            Filter = "媒体与常用文件|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.mp3;*.lrc;*.lua;*.json;*.txt;*.html;*.css;*.js|所有文件|*.*",
+            Multiselect = true,
+            CheckFileExists = true,
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        var ip = RequireSelectedDeviceIp();
+        foreach (var localPath in dialog.FileNames)
+        {
+            var info = new FileInfo(localPath);
+            if (info.Length > 64L * 1024 * 1024) throw new InvalidOperationException($"{info.Name} 超过 64 MB 上传上限。");
+            var devicePath = directory.TrimEnd('/') + "/" + info.Name;
+            if (transformMedia && MediaPreparationService.CanTransform(localPath))
+            {
+                await QueueEventAsync("device.fs.status", new { status = "working", messageKey = "正在处理 {0} 为 320×240", args = new[] { info.Name } });
+                var prepared = await MediaPreparationService.PrepareAsync(localPath, mediaMode, _lifetime.Token);
+                if (prepared.Content.LongLength > 64L * 1024 * 1024) throw new InvalidOperationException($"{info.Name} 处理后超过 64 MB 上传上限。");
+                await RequireDeviceApi().UploadFileAsync(ip, devicePath, prepared.Content, prepared.ContentType, _lifetime.Token);
+            }
+            else
+            {
+                await QueueEventAsync("device.fs.status", new { status = "working", messageKey = "正在上传 {0}", args = new[] { info.Name } });
+                await RequireDeviceApi().UploadLocalFileAsync(ip, devicePath, localPath, _lifetime.Token);
+            }
+        }
+        var resultMessage = transformMedia ? "已上传 {0} 个文件，图片已处理为 320×240" : "已上传 {0} 个文件";
+        await QueueEventAsync("device.fs.status", new { status = "success", messageKey = resultMessage, args = new[] { dialog.FileNames.Length.ToString() } });
+        await ListDeviceFilesAsync(directory);
+    }
+
+    private static bool IsDisplayMediaDirectory(string directory) =>
+        directory.Equals("/sd/images", StringComparison.OrdinalIgnoreCase) ||
+        directory.StartsWith("/sd/images/", StringComparison.OrdinalIgnoreCase) ||
+        directory.Equals("/sd/gifs", StringComparison.OrdinalIgnoreCase) ||
+        directory.StartsWith("/sd/gifs/", StringComparison.OrdinalIgnoreCase);
+
+    private async Task DownloadDeviceFileAsync(string path, string? suggestedName)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "保存设备文件",
+            FileName = string.IsNullOrWhiteSpace(suggestedName) ? Path.GetFileName(path) : suggestedName,
+            Filter = "所有文件|*.*",
+            AddExtension = false,
+        };
+        if (dialog.ShowDialog() != true) return;
+        await QueueEventAsync("device.fs.status", new { status = "working", messageKey = "正在下载设备文件" });
+        var bytes = await RequireDeviceApi().ReadFileAsync(RequireSelectedDeviceIp(), path, 64 * 1024 * 1024, _lifetime.Token);
+        await File.WriteAllBytesAsync(dialog.FileName, bytes, _lifetime.Token);
+        await QueueEventAsync("device.fs.status", new { status = "success", messageKey = "文件已保存到电脑" });
+    }
+
+    private async Task DeleteDeviceFileAsync(string path, string? parent)
+    {
+        await RequireDeviceApi().DeleteFileAsync(RequireSelectedDeviceIp(), path, _lifetime.Token);
+        await QueueEventAsync("device.fs.status", new { status = "success", messageKey = "设备文件已删除" });
+        await ListDeviceFilesAsync(parent);
+    }
+
+    private async Task RenameDevicePathAsync(string path, string newPath, string? parent)
+    {
+        await QueueEventAsync("device.fs.status", new { status = "working", messageKey = "正在重命名设备项目" });
+        await RequireDeviceApi().RenamePathAsync(RequireSelectedDeviceIp(), path, newPath, _lifetime.Token);
+        await QueueEventAsync("device.fs.status", new { status = "success", messageKey = "设备项目已重命名" });
+        await ListDeviceFilesAsync(parent);
+    }
+
+    private async Task CreateDeviceDirectoryAsync(string path, string? parent)
+    {
+        await QueueEventAsync("device.fs.status", new { status = "working", messageKey = "正在创建设备文件夹" });
+        await RequireDeviceApi().CreateDirectoryAsync(RequireSelectedDeviceIp(), path, _lifetime.Token);
+        await QueueEventAsync("device.fs.status", new { status = "success", messageKey = "设备文件夹已创建" });
+        await ListDeviceFilesAsync(parent);
+    }
+
+    private async Task PasteDevicePathAsync(
+        string sourcePath,
+        string destinationPath,
+        bool isDirectory,
+        bool move,
+        string? parent)
+    {
+        await QueueEventAsync("device.fs.status", new
+        {
+            status = "working",
+            messageKey = move ? "正在移动设备项目" : "正在复制设备项目",
+        });
+        if (move)
+        {
+            await RequireDeviceApi().RenamePathAsync(RequireSelectedDeviceIp(), sourcePath, destinationPath, _lifetime.Token);
+        }
+        else
+        {
+            await RequireDeviceApi().CopyPathAsync(RequireSelectedDeviceIp(), sourcePath, destinationPath, isDirectory, _lifetime.Token);
+        }
+        await QueueEventAsync("device.fs.status", new
+        {
+            status = "success",
+            messageKey = move ? "设备项目已移动" : "设备项目已复制",
+        });
+        await ListDeviceFilesAsync(parent);
+    }
+
+    private async Task ReadLuaCodeAsync(string? requestedPath)
+    {
+        var path = NormalizeLuaPath(requestedPath);
+        var bytes = await RequireDeviceApi().ReadFileAsync(RequireSelectedDeviceIp(), path, 1024 * 1024, _lifetime.Token);
+        var code = new System.Text.UTF8Encoding(false, false).GetString(bytes);
+        await QueueEventAsync("device.lua.code", new { path, code });
+    }
+
+    private async Task SaveLuaCodeAsync(string? requestedPath, string code, bool run)
+    {
+        var path = NormalizeLuaPath(requestedPath);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(code);
+        if (bytes.Length > 1024 * 1024) throw new InvalidOperationException("Lua 文件超过 1 MB 保存上限。");
+        await RequireDeviceApi().UploadFileAsync(RequireSelectedDeviceIp(), path, bytes, "text/plain; charset=utf-8", _lifetime.Token);
+        if (run)
+        {
+            await RequireDeviceApi().LaunchAppAsync(RequireSelectedDeviceIp(), "devrun", _lifetime.Token);
+        }
+        await QueueEventAsync("device.lua.saved", new { path, run });
+    }
+
+    private async Task ConnectSerialAsync(string port, int baudRate)
+    {
+        var snapshot = RequireSerial().Connect(port, baudRate);
+        _log.Info("串口", $"已连接 {port} @ {baudRate}");
+        await QueueEventAsync("serial.status", snapshot);
+    }
+
+    private async Task DisconnectSerialAsync()
+    {
+        var snapshot = RequireSerial().Disconnect();
+        _log.Info("串口", "串口已断开");
+        await QueueEventAsync("serial.status", snapshot);
+    }
+
+    private static string NormalizeDeviceDirectory(string? path)
+    {
+        path = string.IsNullOrWhiteSpace(path) ? "/sd" : path.Trim().Replace('\\', '/');
+        if (!path.Equals("/sd", StringComparison.Ordinal) && !path.StartsWith("/sd/", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("设备目录必须位于 /sd。");
+        }
+        if (path.Split('/', StringSplitOptions.RemoveEmptyEntries).Any(part => part is "." or ".."))
+        {
+            throw new ArgumentException("设备目录不能包含相对路径。");
+        }
+        return path.TrimEnd('/') is { Length: > 0 } normalized ? normalized : "/sd";
+    }
+
+    private static string NormalizeLuaPath(string? path)
+    {
+        path = string.IsNullOrWhiteSpace(path) ? "/sd/apps/devrun/main.lua" : path.Trim().Replace('\\', '/');
+        if (!path.StartsWith("/sd/", StringComparison.Ordinal)) throw new ArgumentException("Lua 文件必须位于 /sd。");
+        if (!path.EndsWith(".lua", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Lua 编辑器只能保存 .lua 文件。");
+        var separator = path.LastIndexOf('/');
+        _ = NormalizeDeviceDirectory(path[..separator]);
+        return path;
+    }
+
+    private string RequireSelectedDeviceIp() => SelectedDeviceIp ??
+        throw new InvalidOperationException("请先选择或连接一台设备。");
+
+    private DeviceApiClient RequireDeviceApi() => _deviceApi ??
+        throw new InvalidOperationException("设备接口尚未初始化。");
+
+    private StoreServerClient RequireStoreServer() => _storeServer ??
+        throw new InvalidOperationException("应用商店客户端尚未初始化。");
+
+    private GitHubStoreInstaller RequireGitHubStoreInstaller() => _githubStoreInstaller ??
+        throw new InvalidOperationException("GitHub 应用安装器尚未初始化。");
+
+    private SerialMonitorService RequireSerial() => _serial ??
+        throw new InvalidOperationException("串口服务尚未初始化。");
+
+    private Task SendDeviceListAsync() => QueueEventAsync("device.list", new
+    {
+        devices = _settings.Devices.OrderByDescending(device => device.LastSeen),
+        selectedDeviceIp = SelectedDeviceIp,
+    });
+
+    private string? SelectedDeviceIp => _settings.SelectedDeviceIp ?? _settings.LastDeviceIp;
+
+    private static void UpdateDeviceRuntime(SavedDevice saved, JsonElement state)
+    {
+        saved.CurrentAppId = null;
+        saved.CurrentAppName = null;
+        saved.WifiRssi = null;
+        if (state.TryGetProperty("wifi", out var wifi) && wifi.ValueKind == JsonValueKind.Object &&
+            wifi.TryGetProperty("sta_rssi", out var rssi) && rssi.TryGetInt32(out var value))
+        {
+            saved.WifiRssi = value;
+        }
+        if (!state.TryGetProperty("current_app", out var current) || current.ValueKind != JsonValueKind.Object) return;
+        if (current.TryGetProperty("id", out var id)) saved.CurrentAppId = id.GetString();
+        if (current.TryGetProperty("name", out var name)) saved.CurrentAppName = name.GetString();
+        saved.CurrentAppName ??= saved.CurrentAppId;
+    }
+
+    private async Task ConfigureWorkerAsync(string id)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择上位机启动文件",
+            Filter = "支持的程序|*.exe;*.cmd;*.bat;*.py;*.js|所有文件|*.*",
+            CheckFileExists = true,
+        };
+        if (dialog.ShowDialog() == true) await RequireServices().ConfigureAsync(id, dialog.FileName);
+    }
+
+    private async Task StatusLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                WifiConnection? wifiConnection = null;
+                if (_wifi is not null) wifiConnection = await _wifi.GetCurrentConnectionAsync(cancellationToken);
+                var network = ComputerNetworkService.Resolve(wifiConnection, SelectedDeviceIp);
+                await QueueEventAsync("system.status", new { wifi = network, stats = _stats.GetSnapshot(), time = DateTimeOffset.Now });
+                await Task.Delay(2000, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception error)
+            {
+                _log.Warn("状态", error.Message);
+                await Task.Delay(3000, cancellationToken);
+            }
+        }
+    }
+
+    private async Task SerialStatusLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                _serial?.Refresh();
+                await Task.Delay(1000, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception error)
+            {
+                _log.Warn("串口", "刷新串口状态失败：" + error.Message);
+                await Task.Delay(1000, cancellationToken);
+            }
+        }
+    }
+
+    private Task SaveSettingsAsync() => _store.SaveAsync(_settings);
+
+    private void RequireProvisioning()
+    {
+        if (_provisioning is null) throw new InvalidOperationException("Windows WLAN 服务不可用，无法执行配网操作。");
+    }
+
+    private ManagedServiceManager RequireServices() => _services ?? throw new InvalidOperationException("服务管理器尚未初始化。");
+
+    private static string RequireString(BridgeCommand command, string name) => GetString(command, name)
+        ?? throw new ArgumentException($"缺少参数 {name}");
+
+    private static string? GetString(BridgeCommand command, string name)
+    {
+        if (!command.Payload.TryGetValue(name, out var raw) || raw is null) return null;
+        return raw is JsonElement element ? element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString() : raw.ToString();
+    }
+
+    private static bool GetBool(BridgeCommand command, string name)
+    {
+        if (!command.Payload.TryGetValue(name, out var raw) || raw is null) return false;
+        if (raw is JsonElement element) return element.ValueKind == JsonValueKind.True || (element.ValueKind == JsonValueKind.String && bool.TryParse(element.GetString(), out var parsed) && parsed);
+        return Convert.ToBoolean(raw);
+    }
+
+    private static int GetInt(BridgeCommand command, string name, int fallback)
+    {
+        if (!command.Payload.TryGetValue(name, out var raw) || raw is null) return fallback;
+        if (raw is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out var number)) return number;
+            return int.TryParse(element.ToString(), out number) ? number : fallback;
+        }
+        return int.TryParse(raw.ToString(), out var parsed) ? parsed : fallback;
+    }
+
+    private void QueueEvent(string type, object? payload) => _ = QueueEventAsync(type, payload);
+
+    private Task QueueEventAsync(string type, object? payload) => SendEventAsync?.Invoke(type, payload) ?? Task.CompletedTask;
+
+    public async ValueTask DisposeAsync()
+    {
+        _lifetime.Cancel();
+        if (_statusTask is not null)
+        {
+            try { await _statusTask; } catch (OperationCanceledException) { }
+        }
+        if (_deviceAppServiceTask is not null)
+        {
+            try { await _deviceAppServiceTask; } catch (OperationCanceledException) { }
+        }
+        if (_serialStatusTask is not null)
+        {
+            try { await _serialStatusTask; } catch (OperationCanceledException) { }
+        }
+        if (_services is not null) await _services.DisposeAsync();
+        _serial?.Dispose();
+        _deviceApi?.Dispose();
+        _githubStoreInstaller?.Dispose();
+        _storeServer?.Dispose();
+        _wifi?.Dispose();
+        _holoMonitorConfigLock.Dispose();
+        _lifetime.Dispose();
+    }
+
+    private static readonly Dictionary<string, string> ImageMimeTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".png"] = "image/png",
+        [".jpg"] = "image/jpeg",
+        [".jpeg"] = "image/jpeg",
+        [".gif"] = "image/gif",
+        [".bmp"] = "image/bmp",
+        [".webp"] = "image/webp",
+    };
+
+    private static readonly HashSet<string> TextFileExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".lua", ".txt", ".lrc", ".json", ".html", ".css", ".js", ".md", ".xml", ".csv", ".log", ".conf", ".ini",
+    };
+
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+}

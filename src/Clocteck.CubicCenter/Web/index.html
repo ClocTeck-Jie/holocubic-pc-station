@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clocteck Cubic Center</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="monitor.css">
+  <link rel="stylesheet" href="layout.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div><strong>CLOCTECK</strong><small>CUBIC CENTER</small></div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-page="home"><i>⌂</i><span>总览</span></button>
+        <button class="nav-item" data-page="setup"><i>＋</i><span>添加设备</span></button>
+        <button class="nav-item" data-page="store"><i>▦</i><span>应用商店</span></button>
+        <button class="nav-item" data-page="control"><i>◆</i><span>设备控制</span></button>
+        <div id="controlSubmenu" class="nav-submenu">
+          <button class="active" data-control-tab="apps"><span>应用</span></button>
+          <button data-control-tab="settings"><span>设备设置</span></button>
+          <button data-control-tab="device-services"><span>服务设置</span></button>
+          <button data-control-page="files"><span>文件管理</span></button>
+          <button data-control-page="devtools"><span>开发工具</span></button>
+        </div>
+        <button class="nav-item" data-page="serial"><i>⌁</i><span>串口工具</span></button>
+        <button class="nav-item" data-page="logs"><i>≡</i><span>运行日志</span></button>
+        <button class="nav-item" data-page="about"><i>i</i><span>关于</span></button>
+      </nav>
+      <div class="side-bottom">
+        <div class="network-mini"><span id="sideWifiDot" class="dot muted"></span><div><small>电脑网络</small><strong id="sideWifi">正在检测</strong></div></div>
+        <div class="version">PREVIEW <span id="version">0.1.0</span></div>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <header>
+        <div id="pageHeading"><h1 id="pageTitle">设备总览</h1><p id="pageSubtitle">统一连接并管理 Clocteck Cubic</p></div>
+        <div class="header-actions">
+          <select id="headerLanguageSelect" class="device-select language-select" aria-label="软件语言"><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option><option value="zh-TW">繁體中文</option></select>
+          <select id="headerDeviceSelect" class="device-select" aria-label="当前设备"><option value="">未选择设备</option></select>
+          <div id="devicePill" class="pill offline"><span class="dot"></span><span>设备未连接</span></div>
+          <button id="openDeviceControlButton" class="button secondary" data-command="device.openControl">进入设备控制</button>
+          <button id="controlRefreshButton" class="button secondary hidden" data-command="device.control.refresh">刷新数据</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="page active" id="page-home">
+          <div class="section-heading home-device-heading"><div><span class="eyebrow">CONNECTED DEVICES</span><h2>已连接设备</h2><p>每个方块显示设备 IP 与当前运行的应用</p></div><button class="button secondary" data-command="device.discover">刷新设备状态</button></div>
+          <div id="overviewDeviceGrid" class="overview-device-grid"><div class="panel empty-state">正在读取已连接设备…</div></div>
+          <div class="metric-grid">
+            <article class="metric"><span>CPU</span><strong id="cpuValue">--%</strong><div class="meter"><i id="cpuMeter"></i></div></article>
+            <article class="metric"><span>内存</span><strong id="memoryValue">--%</strong><small id="memoryDetail">等待数据</small></article>
+            <article class="metric"><span>当前网络</span><strong id="wifiValue">未连接</strong><small id="wifiDetail">--</small></article>
+            <article class="metric"><span>当前设备</span><strong id="deviceIp">尚未选择</strong><small id="deviceHost">IP 用于区分设备</small></article>
+          </div>
+          <div class="section-heading"><div><h3>当前已运行的服务</h3><p>打开设备应用时自动启用所需电脑服务</p></div></div>
+          <div id="serviceSummary" class="service-summary"></div>
+        </section>
+
+        <section class="page" id="page-setup">
+          <form id="manualIpForm" class="panel manual-ip-panel">
+            <div><span class="eyebrow">手动连接</span><h3>输入设备 IPv4 地址</h3><p>适用于已完成配网、mDNS 不可用或同一局域网有多台设备的情况。</p></div>
+            <input id="manualIpInput" type="text" inputmode="decimal" placeholder="例如 192.168.0.188" autocomplete="off">
+            <button class="button primary" type="submit">连接设备</button>
+          </form>
+          <div class="setup-layout">
+            <article class="panel setup-main">
+              <div class="panel-head"><div><span class="eyebrow">首次连接向导</span><h2>连接 Clocteck Cubic</h2></div><span id="setupPercent" class="percent">0%</span></div>
+              <div class="progress"><i id="setupProgress"></i></div>
+              <div class="setup-status"><div id="setupIcon" class="setup-icon">01</div><div><h3 id="setupMessage">准备连接设备</h3><p id="setupHint">程序会保存当前 Wi-Fi，再连接设备热点并打开配网页面。</p></div></div>
+              <div id="networkList" class="network-list empty"><p>点击扫描，查找附近的 <b>clocteck-cubic</b> 设备热点。</p></div>
+              <div class="button-row"><button id="scanButton" class="button primary" data-command="wifi.scan">扫描设备热点</button><button id="forceButton" class="button secondary hidden" data-command="provision.forceComplete">已完成配置</button><button id="cancelButton" class="button danger hidden" data-command="provision.cancel">取消并恢复网络</button></div>
+              <div class="notice"><strong>配网期间电脑短暂断网属于正常现象。</strong><span>设备加入目标 Wi-Fi 后，软件会恢复电脑网络、按 IP 发现设备并进入内置控制界面。</span></div>
+            </article>
+            <aside class="panel steps-panel">
+              <h3>连接步骤</h3>
+              <ol id="stepList">
+                <li><b>1</b><div><strong>发现设备热点</strong><span>扫描 clocteck-cubic</span></div></li>
+                <li><b>2</b><div><strong>连接设备</strong><span>切换到设备配置网络</span></div></li>
+                <li><b>3</b><div><strong>设置目标 Wi-Fi</strong><span>在设备网页中填写</span></div></li>
+                <li><b>4</b><div><strong>恢复电脑网络</strong><span>重新连接原 Wi-Fi</span></div></li>
+                <li><b>5</b><div><strong>进入内置控制</strong><span>使用发现到的设备 IP</span></div></li>
+              </ol>
+            </aside>
+          </div>
+        </section>
+
+        <section class="page" id="page-store">
+          <div class="store-hero">
+            <div class="store-hero-copy"><span class="eyebrow">APP STORE</span><h3>应用商店</h3><p id="storeStatus" class="store-status">尚未读取应用商店。</p></div>
+            <div class="store-hero-actions">
+              <label class="store-install-mode"><span>安装方式</span><select id="storeInstallMode"><option value="device">1. 设备下载</option><option value="pc">2. PC 下载</option></select></label>
+              <label class="store-install-mode hidden" id="storeTransferModeField"><span>传输接口</span><select id="storeTransferMode"><option value="fs">固件 FS（推荐）</option><option value="devtools">DevTools 分块</option></select></label>
+              <button id="loadStore" class="button secondary store-refresh-button">刷新应用商店</button>
+            </div>
+          </div>
+          <p id="storeDownloadHint" class="store-download-hint">PC 下载需要电脑能够正常访问 GitHub；GitHub 版本与商店版本不一致时会停止安装。</p>
+          <div id="storeFilters" class="store-filter-tabs" role="tablist" aria-label="应用分类">
+            <button class="active" type="button" data-store-filter="all" aria-pressed="true">全部</button>
+            <button type="button" data-store-filter="installed" aria-pressed="false">已安装</button>
+            <button type="button" data-store-filter="available" aria-pressed="false">可安装</button>
+            <button type="button" data-store-filter="service" aria-pressed="false">服务</button>
+            <button type="button" data-store-filter="launcher" aria-pressed="false">启动器</button>
+            <button type="button" data-store-filter="weather" aria-pressed="false">天气</button>
+            <button type="button" data-store-filter="time" aria-pressed="false">时间</button>
+          </div>
+          <div class="store-workbench"><div id="storeGrid" class="control-card-grid store-grid"></div></div>
+        </section>
+
+        <section class="page" id="page-control">
+          <div class="device-control-layout">
+            <div class="control-content">
+              <div class="control-panel active" id="control-apps">
+                <div class="app-workbench">
+                  <div class="app-list-pane">
+                    <div class="section-heading compact"><div><h3>设备应用</h3><p>选择并启动应用</p></div><button id="exitCurrentApp" class="button danger hidden">退出当前应用</button></div>
+                    <div id="deviceAppGrid" class="device-app-list"><div class="panel empty-state">连接设备后显示应用列表。</div></div>
+                  </div>
+                  <div id="appEmbeddedPane" class="embedded-pane panel empty">
+                    <div class="embedded-toolbar"><div><b id="embeddedAppTitle">应用控制</b><span id="embeddedAppUrl">启动带控制页面的应用后自动显示</span></div><button id="configureCurrentMonitor" class="button primary hidden" data-command="holoMonitor.configure">自动配置 PC 监控</button></div>
+                    <div id="embeddedAppPlaceholder" class="frame-placeholder"><span>▧</span><b>应用控制页面</b><p>打开应用后，如果应用提供控制页，将在这里与应用列表左右分屏显示。</p></div>
+                    <iframe id="embeddedAppFrame" title="应用控制页面" referrerpolicy="no-referrer"></iframe>
+                  </div>
+                </div>
+              </div>
+
+              <div class="control-panel" id="control-settings">
+                <form id="deviceSettingsForm" class="settings-layout">
+                  <article class="panel settings-card settings-summary-card weather-settings-card">
+                    <span class="eyebrow">WEATHER & TIME</span><h3>天气与时区</h3>
+                    <label><span>天气地区</span><input id="weatherAddress" name="weather_address" placeholder="例如 上海市浦东新区"></label>
+                    <label><span>时区</span><select id="timezoneSelect" name="timezone">
+                      <option value="UTC0">UTC（UTC+0）</option><option value="GMT-1">欧洲中部（UTC+1）</option><option value="GMT-2">东欧（UTC+2）</option><option value="MSK-3">莫斯科（UTC+3）</option>
+                      <option value="GST-4">海湾（UTC+4）</option><option value="PKT-5">巴基斯坦（UTC+5）</option><option value="IST-5:30">印度（UTC+5:30）</option><option value="BST-6">孟加拉（UTC+6）</option>
+                      <option value="ICT-7">曼谷（UTC+7）</option><option value="CST-8">中国标准时间（UTC+8）</option><option value="JST-9">日本（UTC+9）</option><option value="AEST-10">澳大利亚东部（UTC+10）</option>
+                      <option value="NZST-12">新西兰（UTC+12）</option><option value="HST10">夏威夷（UTC-10）</option><option value="AKST9AKDT,M3.2.0,M11.1.0">阿拉斯加（UTC-9/-8）</option><option value="PST8PDT,M3.2.0,M11.1.0">北美太平洋（UTC-8/-7）</option>
+                      <option value="MST7MDT,M3.2.0,M11.1.0">北美山地（UTC-7/-6）</option><option value="CST6CDT,M3.2.0,M11.1.0">北美中部（UTC-6/-5）</option><option value="EST5EDT,M3.2.0,M11.1.0">北美东部（UTC-5/-4）</option><option value="BRT3">巴西利亚（UTC-3）</option>
+                    </select></label>
+                  </article>
+                  <article class="panel settings-card settings-summary-card display-settings-card">
+                    <span class="eyebrow">DISPLAY</span><h3>亮度与自动息屏</h3>
+                    <label><span>屏幕亮度 <b id="brightnessValue">80%</b></span><input id="brightnessRange" name="brightness" type="range" min="1" max="100" value="80"></label>
+                    <label><span>无操作自动息屏</span><select id="autoSleepSelect" name="auto_sleep_seconds"><option value="0">关闭</option><option value="60">1 分钟</option><option value="300">5 分钟</option><option value="600">10 分钟</option><option value="1800">30 分钟</option><option value="3600">1 小时</option></select></label>
+                    <button id="wakeDisplay" class="button secondary" type="button">立即唤醒屏幕</button>
+                  </article>
+                  <article class="panel settings-card settings-summary-card alarm-card schedule-settings-card">
+                    <span class="eyebrow">SCHEDULE</span><h3>定时息屏与亮屏</h3>
+                    <label><span>启用定时息屏</span><select id="scheduledSleepEnabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
+                    <label><span>息屏模式</span><select id="scheduledSleepMode"><option value="off">关闭屏幕</option><option value="dim">降低亮度</option></select></label>
+                    <div class="time-pair"><label><span>息屏时间</span><input id="scheduledSleepTime" type="time" value="00:00"></label><label><span>亮屏时间</span><input id="scheduledWakeTime" type="time" value="07:00"></label></div>
+                    <button id="openAlarmService" class="button secondary" type="button">进入设备原生设置页</button>
+                  </article>
+                  <article class="panel settings-card alarms-wide">
+                    <div class="alarm-heading"><div><span class="eyebrow">ALARMS</span><h3>三组闹钟</h3></div><div class="button-row"><button id="testAlarm" class="button secondary" type="button">试听</button><button id="stopAlarm" class="button ghost" type="button">停止</button></div></div>
+                    <label class="alarm-sound"><span>闹钟声音</span><select id="alarmSound"><option value="">默认嘀嘀声</option></select></label>
+                    <div id="alarmRows" class="alarm-rows"></div>
+                  </article>
+                  <article class="panel settings-card firmware-wide">
+                    <div class="firmware-heading"><div><span class="eyebrow">FIRMWARE</span><h3>固件更新</h3></div><span id="firmwareBadge" class="status-tag">等待检查</span></div>
+                    <div class="firmware-version-grid"><div><span>当前版本</span><b id="firmwareCurrentVersion">-</b></div><div><span>最新版本</span><b id="firmwareLatestVersion">-</b></div></div>
+                    <p id="firmwareNote" class="firmware-note">点击“检查更新”获取设备固件更新状态。</p>
+                    <div class="firmware-progress"><i id="firmwareProgressFill"></i></div>
+                    <div class="button-row firmware-actions"><button id="checkFirmware" class="button secondary" type="button">检查更新</button><button id="installFirmware" class="button primary" type="button" disabled>安装更新</button></div>
+                  </article>
+                  <div class="settings-actions"><button class="button primary" type="submit">保存到当前设备</button><span id="settingsSaveHint"></span></div>
+                </form>
+              </div>
+
+              <div class="control-panel" id="control-device-services">
+                <div class="section-heading compact"><div><h3>设备服务</h3><p>服务页面以内嵌方式使用当前设备 IP 访问</p></div></div>
+                <div class="service-workbench"><div id="deviceServiceGrid" class="device-service-list"><div class="panel empty-state">连接设备后显示服务。</div></div><div id="serviceEmbeddedPane" class="embedded-pane panel empty"><div class="embedded-toolbar"><div><b id="embeddedServiceTitle">服务设置</b><span id="embeddedServiceUrl">选择服务后显示</span></div></div><div id="embeddedServicePlaceholder" class="frame-placeholder"><span>⚙</span><b>服务设置页面</b><p>请选择左侧服务。</p></div><iframe id="embeddedServiceFrame" title="服务设置页面" referrerpolicy="no-referrer"></iframe></div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="page" id="page-serial">
+          <div class="section-heading"><div><h2>串口工具</h2><p>连接设备串口并实时读取输出信息</p></div><span id="serialToolStatusBadge" class="status-tag">串口未连接</span></div>
+          <div class="serial-info-grid">
+            <article class="panel serial-info-card"><span>当前串口</span><strong id="serialPortMetric">--</strong><small>8-N-1</small></article>
+            <article class="panel serial-info-card"><span>波特率</span><strong id="serialBaudMetric">115200</strong><small>baud</small></article>
+            <article class="panel serial-info-card"><span>已接收</span><strong id="serialBytesMetric">0 B</strong><small>RX</small></article>
+            <article class="panel serial-info-card"><span>连接时间</span><strong id="serialConnectedMetric">--</strong><small id="serialErrorMetric">未连接</small></article>
+          </div>
+          <div class="panel serial-toolbar">
+            <label><span>串口</span><select id="serialPortSelect"><option value="">未发现串口</option></select></label>
+            <label><span>波特率</span><select id="serialBaudSelect"><option>115200</option><option>921600</option><option>460800</option><option>230400</option><option>57600</option><option>38400</option><option>19200</option><option>9600</option></select></label>
+            <button id="refreshSerialPorts" class="button secondary" type="button">刷新串口</button>
+            <button id="connectSerial" class="button primary" type="button">连接</button>
+            <button id="disconnectSerial" class="button danger hidden" type="button">断开</button>
+            <button id="clearSerial" class="button ghost" type="button">清空输出</button>
+            <span id="serialStatus" class="serial-status">串口未连接</span>
+          </div>
+          <pre id="serialOutput" class="serial-output"><span>等待串口输出…</span></pre>
+        </section>
+
+        <section class="page" id="page-logs">
+          <div class="section-heading"><div><h2>运行日志</h2><p>查看软件运行事件和错误信息</p></div></div>
+          <div class="log-toolbar"><span><i class="dot online"></i>信息</span><span><i class="dot warning"></i>警告</span><span><i class="dot error"></i>错误</span><button class="log-clear-button" type="button" id="clearLogs">清空显示</button></div>
+          <div id="logList" class="log-list"><div class="log-empty">等待运行日志…</div></div>
+        </section>
+
+        <section class="page" id="page-files">
+          <div class="section-heading"><div><h2>设备文件管理</h2><p>管理图片、GIF、音乐、歌词和应用文件</p></div><span id="fileManagerDeviceBadge" class="status-tag">请选择设备</span></div>
+          <div class="media-path-presets" role="navigation" aria-label="媒体目录">
+            <button class="active" type="button" data-media-path="/sd/images" data-media-kind="image"><b>图片</b><span>/sd/images · 相册</span></button>
+            <button type="button" data-media-path="/sd/gifs" data-media-kind="gif"><b>GIF</b><span>/sd/gifs · 动图播放器</span></button>
+            <button type="button" data-media-path="/sd/mp3" data-media-kind="audio"><b>音乐与歌词</b><span>/sd/mp3 · MP3 / LRC</span></button>
+            <button type="button" data-media-path="/sd/apps" data-media-kind="app"><b>应用文件</b><span>/sd/apps · App 数据</span></button>
+          </div>
+          <div class="panel media-upload-options">
+            <div><span class="eyebrow">MEDIA PROCESSING</span><h3>上传图片与 GIF</h3><p>自动处理全部动画帧；音乐、歌词和其他文件保持原样。</p></div>
+            <label><span>320×240 处理方式</span><select id="mediaResizeMode"><option value="crop">居中裁切并填满</option><option value="fit">等比例适应并补黑边</option><option value="original">保持原始尺寸</option></select></label>
+          </div>
+          <div class="file-manager-layout">
+            <article class="panel file-browser-card">
+              <div class="file-path-toolbar"><button id="deviceFilesUp" class="button ghost" type="button">上一级</button><input id="deviceFilesPath" value="/sd/images" spellcheck="false"><button id="refreshDeviceFiles" class="button secondary" type="button">刷新</button><button id="createDeviceFolder" class="button secondary" type="button">新建文件夹</button><button id="pasteDeviceFile" class="button secondary" type="button" disabled>粘贴</button><button id="uploadDeviceFiles" class="button primary" type="button">上传到此目录</button></div>
+              <div class="file-list-summary"><span id="deviceFilesSummary">尚未读取设备目录</span><span id="deviceFsStatus"></span></div>
+              <div id="deviceFileList" class="device-file-list"><div class="file-empty">请选择设备并刷新目录。</div></div>
+            </article>
+            <article class="panel file-preview-card">
+              <div class="file-preview-heading"><div><span class="eyebrow">PREVIEW</span><h3 id="selectedDeviceFileName">未选择文件</h3><p id="selectedDeviceFilePath">从左侧选择图片、文件或文件夹</p></div><div class="button-row file-selection-actions"><button id="editLuaFile" class="button primary hidden" type="button">在 DevRun 中编辑</button><button id="renameDeviceFile" class="button secondary" type="button" disabled>重命名</button><button id="copyDeviceFile" class="button secondary" type="button" disabled>复制</button><button id="cutDeviceFile" class="button secondary" type="button" disabled>剪切</button><button id="downloadDeviceFile" class="button secondary" type="button" disabled>下载</button><button id="deleteDeviceFile" class="button danger" type="button" disabled>删除</button></div></div>
+              <div id="deviceFilePreview" class="device-file-preview"><div class="file-empty">支持预览 PNG、JPG、GIF、WebP、Lua、JSON、歌词和文本文件。</div></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="page" id="page-devtools">
+          <div class="section-heading"><div><h2>设备开发工具</h2><p>通过当前设备 IP 编辑并运行 DevRun Lua 代码</p></div><span id="developerDeviceBadge" class="status-tag">请选择设备</span></div>
+          <article class="panel lua-editor-card">
+            <div class="lua-editor-toolbar"><div><span class="eyebrow">DEVRUN LUA</span><h3>Lua 代码编辑器</h3></div><div class="lua-path-actions"><input id="luaFilePath" value="/sd/apps/devrun/main.lua" spellcheck="false"><button id="readLuaCode" class="button secondary" type="button">读取</button><button id="saveLuaCode" class="button ghost" type="button">保存</button><button id="runLuaCode" class="button primary" type="button">保存并运行</button></div></div>
+            <textarea id="luaCodeEditor" class="lua-code-editor" spellcheck="false" placeholder="-- 在这里编辑 DevRun Lua 代码"></textarea>
+            <div class="lua-editor-status"><span id="luaCodeMeta">1 行 · 0 字符</span><span id="luaCodeState">尚未读取</span></div>
+          </article>
+        </section>
+
+        <section class="page" id="page-about">
+          <article class="panel about-card"><div class="about-logo">CC</div><span class="eyebrow">CLOCTECK SOFTWARE</span><h2>Cubic Center</h2><p>面向 Clocteck Cubic 的 Windows 设备连接、内置控制与上位机服务中心。</p><div class="about-grid"><div><span>当前版本</span><b>0.1.0 Preview</b></div><div><span>运行平台</span><b>.NET 10 / Windows</b></div><div><span>设备识别</span><b>IPv4 地址</b></div><div><span>界面</span><b>本地 WebView2 UI</b></div></div></article>
+        </section>
+      </main>
+    </section>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

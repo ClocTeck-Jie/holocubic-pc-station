@@ -1,0 +1,33 @@
+# .NET build output
+**/bin/
+**/obj/
+artifacts/
+publish/
+
+# Portable runtime data
+**/data/
+**/downloads/
+**/cache/
+**/logs/
+**/webview2/
+
+# Bundled third-party runtime (use system Node.js in source builds)
+**/CompanionServices/node/node.exe
+
+# IDE and OS files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+*.zip
+*.7z

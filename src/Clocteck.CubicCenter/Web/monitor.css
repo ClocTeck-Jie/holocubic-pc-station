@@ -1,0 +1,130 @@
+.monitor-config-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #29312c;
+  border-radius: 8px;
+  background: #0d110f;
+  padding: 10px 12px;
+  margin: -10px 0 14px;
+}
+
+.monitor-config-status > div { min-width: 0; }
+.monitor-config-status b { display: block; color: #c8d1cb; font-size: 10px; }
+.monitor-config-status small {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #748078;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-config-status.success { border-color: #40512b; background: #11170f; }
+.monitor-config-status.error { border-color: #553033; background: #171011; }
+.monitor-config-status.working { border-color: #53472e; }
+
+.device-select {
+  height: 34px;
+  max-width: 230px;
+  padding: 0 30px 0 11px;
+  border: 1px solid #2b342e;
+  border-radius: 8px;
+  outline: none;
+  background: #111512;
+  color: #cbd4ce;
+  font-size: 11px;
+}
+
+.manual-ip-panel {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(240px, 340px) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 20px 22px;
+  margin-bottom: 14px;
+}
+.manual-ip-panel h3 { margin: 6px 0 3px; font-size: 15px; }
+.manual-ip-panel p { margin: 0; color: #768279; font-size: 10px; }
+.manual-ip-panel input,
+.settings-card input:not([type="range"]),
+.settings-card select {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid #303933;
+  border-radius: 8px;
+  outline: none;
+  background: #0b0f0d;
+  color: #e3eae5;
+  font-size: 11px;
+}
+.manual-ip-panel input:focus,
+.settings-card input:focus,
+.settings-card select:focus { border-color: #718d38; box-shadow: 0 0 0 3px rgba(198,250,56,.06); }
+
+.device-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.empty-state { min-height: 110px; display: grid; place-items: center; padding: 25px; color: #6e7a72; font-size: 11px; }
+.saved-device { display: grid; grid-template-columns: 150px 1fr; min-height: 225px; padding: 22px; align-items: center; transition: border-color .18s; }
+.saved-device.selected { border-color: #4a5e2e; box-shadow: inset 3px 0 #c6fa38; }
+.device-render.small .screen { width: 112px; height: 84px; border-width: 6px; border-radius: 10px; font-size: 9px; }
+.saved-device-copy { min-width: 0; }
+.saved-device-copy > .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.saved-device h3 { margin: 6px 0 0; font-size: 17px; }
+.device-address { margin: 16px 0 5px; color: #e8f3eb; font: 18px Consolas, monospace; }
+.saved-device p { margin: 0 0 16px; color: #748078; font-size: 9px; }
+
+.control-heading { margin-top: 0; }
+.control-status { display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 0 13px; margin-bottom: 12px; border: 1px solid #28302b; border-radius: 8px; background: #0d110f; color: #7d8981; font-size: 10px; }
+.control-status.success { color: #cfe89c; border-color: #38482a; }
+.control-status.error { color: #f29a9a; border-color: #533034; }
+.control-tabs { display: flex; gap: 4px; padding: 5px; margin-bottom: 14px; border: 1px solid #242c27; border-radius: 10px; background: #0e1210; }
+.control-tabs button { height: 35px; padding: 0 18px; border: 0; border-radius: 7px; background: transparent; color: #78847c; cursor: pointer; font-size: 11px; }
+.control-tabs button:hover { color: #dce5df; background: #151a17; }
+.control-tabs button.active { color: #111806; background: #c6fa38; font-weight: 650; }
+.control-panel { display: none; }
+.control-panel.active { display: block; animation: fade .18s ease; }
+.section-heading.compact { margin-top: 17px; }
+.control-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+.control-card { min-height: 155px; padding: 16px; }
+.control-card.current { border-color: #4a5d2d; background: #11170f; }
+.control-card-head { display: flex; align-items: center; gap: 11px; }
+.control-card-head > div:nth-child(2) { min-width: 0; flex: 1; }
+.control-card-head h3 { margin: 0; overflow: hidden; color: #e4ebe6; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.control-card-head p { margin: 5px 0 0; overflow: hidden; color: #6f7a73; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.control-card > .button-row { margin-top: 18px; }
+.app-letter { display: grid; width: 39px; height: 39px; flex: 0 0 auto; place-items: center; border: 1px solid #334029; border-radius: 9px; background: #1a2117; color: #c6fa38; font: bold 13px Consolas; }
+.app-store-icon { position: relative; overflow: hidden; }
+.app-store-icon span { position: relative; z-index: 0; }
+.app-store-icon img { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #111512; filter: none; mix-blend-mode: normal; opacity: 1; }
+.card-description { min-height: 30px; margin: 13px 0 0; overflow: hidden; color: #79857d; font-size: 10px; line-height: 1.5; }
+.inline-note { min-height: 35px; margin: 0 0 11px; padding: 10px 12px; border: 1px solid #252d28; border-radius: 8px; color: #748078; background: #0e1210; font-size: 10px; }
+.error-text { color: #ef9393; }
+
+.settings-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.settings-card { padding: 20px; }
+.settings-card h3 { margin: 7px 0 17px; font-size: 15px; }
+.settings-card label { display: block; margin-top: 13px; }
+.settings-card label > span { display: flex; justify-content: space-between; margin-bottom: 7px; color: #7f8a83; font-size: 10px; }
+.settings-card label b { color: #c6fa38; font: 10px Consolas; }
+.settings-card input[type="range"] { width: 100%; accent-color: #c6fa38; }
+.settings-card .button { margin-top: 17px; }
+.settings-card.alarm-card { display: flex; flex-direction: column; }
+.settings-card.alarm-card p { margin: 0; color: #78847c; font-size: 10px; line-height: 1.7; }
+.settings-card.alarm-card .button { margin-top: auto; align-self: flex-start; }
+.settings-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 3px 0; }
+.settings-actions span { color: #7c887f; font-size: 10px; }
+
+@media(max-width:1200px) {
+  .control-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .device-list { grid-template-columns: 1fr; }
+}
+
+@media(max-width:900px) {
+  .manual-ip-panel { grid-template-columns: 1fr; }
+  .settings-layout { grid-template-columns: 1fr; }
+  .settings-actions { grid-column: 1; }
+  .control-card-grid { grid-template-columns: 1fr; }
+  .saved-device { grid-template-columns: 120px 1fr; }
+}
