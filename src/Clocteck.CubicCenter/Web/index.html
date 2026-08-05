@@ -26,6 +26,7 @@
           <button data-control-tab="device-services"><span>服务设置</span></button>
           <button data-control-page="files"><span>文件管理</span></button>
           <button data-control-page="devtools"><span>开发工具</span></button>
+          <button data-control-page="speed"><span>网速测试</span></button>
         </div>
         <button class="nav-item" data-page="serial"><i>⌁</i><span>串口工具</span></button>
         <button class="nav-item" data-page="logs"><i>≡</i><span>运行日志</span></button>
@@ -149,6 +150,12 @@
                     <label><span>无操作自动息屏</span><select id="autoSleepSelect" name="auto_sleep_seconds"><option value="0">关闭</option><option value="60">1 分钟</option><option value="300">5 分钟</option><option value="600">10 分钟</option><option value="1800">30 分钟</option><option value="3600">1 小时</option></select></label>
                     <button id="wakeDisplay" class="button secondary" type="button">立即唤醒屏幕</button>
                   </article>
+                  <article class="panel settings-card settings-summary-card startup-network-settings-card">
+                    <span class="eyebrow">STARTUP & NETWORK</span><h3>启动与热点</h3>
+                    <label><span>自启动应用</span><select id="autostartAppSelect" name="autostart_app_id"><option value="">关闭自启动</option></select></label>
+                    <label><span>AP 状态</span><select id="apEnabledSelect" name="ap_enabled"><option value="true">开启</option><option value="false">关闭</option></select></label>
+                    <p class="settings-note">关闭 AP 后设备仍使用当前局域网 IP 连接。</p>
+                  </article>
                   <article class="panel settings-card settings-summary-card alarm-card schedule-settings-card">
                     <span class="eyebrow">SCHEDULE</span><h3>定时息屏与亮屏</h3>
                     <label><span>启用定时息屏</span><select id="scheduledSleepEnabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
@@ -238,6 +245,61 @@
             <textarea id="luaCodeEditor" class="lua-code-editor" spellcheck="false" placeholder="-- 在这里编辑 DevRun Lua 代码"></textarea>
             <div class="lua-editor-status"><span id="luaCodeMeta">1 行 · 0 字符</span><span id="luaCodeState">尚未读取</span></div>
           </article>
+        </section>
+
+        <section class="page" id="page-speed">
+          <div class="section-heading"><div><h2>设备网速测试</h2><p>同时测试多台设备的双向传输速度，可对比 FS 与 DevTools 接口、连续文件与碎片文件。</p></div><span id="speedTestDeviceBadge" class="status-tag">请选择设备</span></div>
+          <div class="speed-layout">
+            <form id="speedTestForm" class="panel speed-config-card">
+              <div class="speed-config-heading"><span class="eyebrow">NETWORK SPEED</span><h3>测试参数</h3><p>电脑传设备表示 PC 写入设备；设备传电脑表示从设备读取到 PC。测试文件会临时写入设备 SD 卡，不会进入 devrun。</p></div>
+              <div class="speed-device-header">
+                <span>测试设备</span>
+                <div>
+                  <button id="speedSelectCurrentDevice" class="button ghost tiny" type="button">当前设备</button>
+                  <button id="speedSelectAllDevices" class="button ghost tiny" type="button">全选在线</button>
+                </div>
+              </div>
+              <div id="speedDeviceList" class="speed-device-list"><div class="speed-empty compact">等待设备列表。</div></div>
+              <label><span>测试方向</span><select id="speedDirection"><option value="both">电脑传设备 + 设备传电脑</option><option value="upload">仅电脑传设备</option><option value="download">仅设备传电脑</option></select></label>
+              <label><span>测试接口</span><select id="speedTransport"><option value="both">FS + DevTools</option><option value="fs">仅 FS</option><option value="devtools">仅 DevTools</option></select></label>
+              <label><span>测试类型</span><select id="speedLayout"><option value="both">连续文件 + 碎片文件</option><option value="continuous">仅连续文件</option><option value="fragments">仅碎片文件</option></select></label>
+              <div class="speed-two-columns">
+                <label><span>测试轮数</span><input id="speedRounds" type="number" min="1" max="20" value="2"></label>
+                <label><span>并发设备数</span><input id="speedParallel" type="number" min="1" max="8" value="4"></label>
+              </div>
+              <label><span>延迟测试次数</span><input id="speedLatencyCount" type="number" min="1" max="100" value="10"></label>
+              <label><span>连续文件大小 KB</span><input id="speedContinuousKb" type="number" min="1" max="65536" value="1024"></label>
+              <div class="speed-two-columns">
+                <label><span>碎片数量</span><input id="speedFragmentCount" type="number" min="1" max="2000" value="64"></label>
+                <label><span>单个碎片 KB</span><input id="speedFragmentKb" type="number" min="1" max="4096" value="4"></label>
+              </div>
+              <div class="speed-two-columns">
+                <label><span>DevTools 分块 KB</span><input id="speedDevtoolsChunkKb" type="number" min="4" max="256" value="64"></label>
+                <label><span>测试目录</span><input id="speedTestPath" value="/sd" spellcheck="false"></label>
+              </div>
+              <div class="speed-action-row">
+                <button id="startSpeedTest" class="button primary" type="submit">开始传输测试</button>
+                <button id="startLatencyTest" class="button secondary" type="button">开始延迟测试</button>
+              </div>
+              <div class="speed-progress"><i id="speedProgressFill"></i></div>
+              <div id="speedProgressText" class="speed-progress-text">0%</div>
+              <p id="speedTestStatus" class="speed-status">等待开始测试。</p>
+            </form>
+            <article class="panel speed-result-card">
+              <div class="speed-result-heading"><div><span class="eyebrow">RESULTS</span><h3>详细结果</h3></div><button id="clearSpeedResults" class="button ghost" type="button">清空</button></div>
+              <div class="speed-summary-grid">
+                <div><span>FS 电脑传设备</span><b id="speedFsUploadAverage">-- KB/S</b></div>
+                <div><span>FS 设备传电脑</span><b id="speedFsDownloadAverage">-- KB/S</b></div>
+                <div><span>DevTools 电脑传设备</span><b id="speedDevtoolsUploadAverage">-- KB/S</b></div>
+                <div><span>DevTools 设备传电脑</span><b id="speedDevtoolsDownloadAverage">-- KB/S</b></div>
+                <div><span>API 平均延迟</span><b id="speedLatencyAverage">-- ms</b></div>
+                <div><span>最近结果</span><b id="speedLastResult">--</b></div>
+              </div>
+              <div class="speed-visual-heading"><span class="eyebrow">DEVICE SUMMARY</span><h4>设备参数汇总</h4><p>按 IP 合并结果，优先看这一张表判断网络状态。</p></div>
+              <div id="speedDeviceSummary" class="speed-visual-summary"><div class="speed-empty compact">暂无汇总数据。</div></div>
+              <div id="speedResultList" class="speed-result-list"><div class="speed-empty">暂无测速结果。</div></div>
+            </article>
+          </div>
         </section>
 
         <section class="page" id="page-about">

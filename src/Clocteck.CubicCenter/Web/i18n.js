@@ -24,6 +24,11 @@
   ];
 
   rows.push(
+    ['启动与热点','Startup & hotspot','起動とアクセスポイント','啟動與熱點'],
+    ['自启动应用','Startup app','自動起動アプリ','自動啟動應用程式'],
+    ['关闭自启动','Disable autostart','自動起動しない','關閉自動啟動'],
+    ['AP 状态','AP status','AP 状態','AP 狀態'],
+    ['关闭 AP 后设备仍使用当前局域网 IP 连接。','After AP is disabled, the device still uses the current LAN IP connection.','AP を無効にしても、デバイスは現在の LAN IP 接続を使用します。','關閉 AP 後，裝置仍使用目前區域網路 IP 連線。'],
     ['当前已运行的服务','Running services','実行中のサービス','目前執行中的服務'],
     ['打开设备应用时自动启用所需电脑服务','Required PC services start when a device app opens','デバイスアプリを開くと必要な PC サービスを自動起動します','開啟裝置應用程式時自動啟用所需電腦服務'],
     ['停止服务','Stop service','サービスを停止','停止服務'],

@@ -208,6 +208,12 @@ public sealed class AppController : IAsyncDisposable
                         GetBool(command, "move"),
                         GetString(command, "parent"));
                     break;
+                case "device.speed.test":
+                    await RunDeviceSpeedTestAsync(command);
+                    break;
+                case "device.latency.test":
+                    await RunDeviceLatencyTestAsync(command);
+                    break;
                 case "device.lua.read":
                     await ReadLuaCodeAsync(GetString(command, "path"));
                     break;
@@ -559,8 +565,14 @@ public sealed class AppController : IAsyncDisposable
                 await SendDeviceListAsync();
             }
 
-            var appKey = $"{ip}:{CurrentAppId(state) ?? "launcher"}";
-            if (!force && string.Equals(_lastObservedDeviceAppKey, appKey, StringComparison.OrdinalIgnoreCase)) return;
+            var currentAppId = CurrentAppId(state);
+            var appKey = $"{ip}:{currentAppId ?? "launcher"}";
+            if (!force &&
+                string.Equals(_lastObservedDeviceAppKey, appKey, StringComparison.OrdinalIgnoreCase) &&
+                CompanionServiceForApp(currentAppId) is null)
+            {
+                return;
+            }
             var snapshot = await _deviceApi.GetControlSnapshotAsync(ip, _lifetime.Token);
             await EnsureCompanionForSnapshotAsync(ip, snapshot.State, snapshot.Settings, force);
         }
@@ -598,7 +610,7 @@ public sealed class AppController : IAsyncDisposable
         "holo_pc_monitor" or "holo-pc-monitor" => "pc-monitor",
         "codex_buddy" or "codex-buddy" => "codex-core",
         "desktop_mirror" or "desktop-mirror" => "desktop-mirror",
-        "smtc_music" or "smtc-music" => "smtc-music",
+        "smtc_music" or "smtc-music" or "holocubic-smtc-music" => "smtc-music",
         _ => null,
     };
 
@@ -607,8 +619,7 @@ public sealed class AppController : IAsyncDisposable
         var worker = _settings.Workers.FirstOrDefault(item => item.Id.Equals("smtc-music", StringComparison.OrdinalIgnoreCase));
         if (worker is null) return;
         var serviceDirectory = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "smtc");
-        var bundledNode = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "node", "node.exe");
-        worker.Executable = File.Exists(bundledNode) ? bundledNode : "node.exe";
+        worker.Executable = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "node", "node.exe");
         worker.Arguments = $"\"{Path.Combine(serviceDirectory, "smtc-bridge.js")}\"";
         worker.WorkingDirectory = serviceDirectory;
         worker.Port = 17865;
@@ -824,6 +835,7 @@ public sealed class AppController : IAsyncDisposable
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(9);
         string? route = null;
+        var confirmed = false;
         while (DateTimeOffset.UtcNow < deadline && !_lifetime.IsCancellationRequested)
         {
             try
@@ -833,7 +845,13 @@ public sealed class AppController : IAsyncDisposable
                                 current.TryGetProperty("id", out var id)
                     ? id.GetString()
                     : null;
-                if (string.Equals(currentId, appId, StringComparison.OrdinalIgnoreCase) &&
+                var matchesRequestedApp = string.Equals(currentId, appId, StringComparison.OrdinalIgnoreCase);
+                if (matchesRequestedApp && !confirmed)
+                {
+                    confirmed = true;
+                    await QueueEventAsync("device.app.confirmed", new { id = appId, state });
+                }
+                if (matchesRequestedApp &&
                     state.TryGetProperty("current_route_base", out var routeNode) &&
                     routeNode.ValueKind == JsonValueKind.String)
                 {
@@ -1175,6 +1193,528 @@ public sealed class AppController : IAsyncDisposable
         await ListDeviceFilesAsync(parent);
     }
 
+    private async Task RunDeviceSpeedTestAsync(BridgeCommand command)
+    {
+        var requestedIps = GetStringList(command, "ips")
+            .Where(ip => IPAddress.TryParse(ip, out _))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (requestedIps.Length == 0) requestedIps = [RequireSelectedDeviceIp()];
+
+        var transport = (GetString(command, "transport") ?? "both").Trim().ToLowerInvariant();
+        var layout = (GetString(command, "layout") ?? "both").Trim().ToLowerInvariant();
+        var direction = (GetString(command, "direction") ?? "both").Trim().ToLowerInvariant();
+        var baseDirectory = NormalizeDeviceDirectory(GetString(command, "path") ?? "/sd");
+        var rounds = Math.Clamp(GetInt(command, "rounds", 2), 1, 20);
+        var continuousKb = Math.Clamp(GetInt(command, "continuousKb", 1024), 1, 64 * 1024);
+        var fragmentKb = Math.Clamp(GetInt(command, "fragmentKb", 4), 1, 4096);
+        var fragmentCount = Math.Clamp(GetInt(command, "fragmentCount", 64), 1, 2000);
+        var devtoolsChunkKb = Math.Clamp(GetInt(command, "devtoolsChunkKb", 64), 4, 256);
+        var maxParallel = Math.Clamp(GetInt(command, "parallel", Math.Min(4, requestedIps.Length)), 1, 8);
+        var transports = transport switch
+        {
+            "fs" => new[] { "fs" },
+            "devtools" => new[] { "devtools" },
+            _ => new[] { "fs", "devtools" },
+        };
+        var layouts = layout switch
+        {
+            "continuous" => new[] { "continuous" },
+            "fragments" => new[] { "fragments" },
+            _ => new[] { "continuous", "fragments" },
+        };
+        var directions = direction switch
+        {
+            "upload" => new[] { "upload" },
+            "download" => new[] { "download" },
+            _ => new[] { "upload", "download" },
+        };
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), "clocteck-pcapp-speed", DateTimeOffset.Now.ToString("yyyyMMddHHmmssfff"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var filesByLayout = CreateSpeedTestFiles(tempRoot, baseDirectory, layouts, continuousKb, fragmentKb, fragmentCount);
+            var totalScenarios = requestedIps.Length * transports.Length * layouts.Length * directions.Length * rounds;
+            var completedScenarios = 0;
+            var progressLock = new object();
+
+            await QueueEventAsync("device.speed.status", new
+            {
+                status = "working",
+                reset = true,
+                progress = 0,
+                completed = 0,
+                total = totalScenarios,
+                activeDevices = requestedIps.Length,
+                message = $"开始测速：{requestedIps.Length} 台设备，并发 {maxParallel}",
+            });
+
+            using var semaphore = new SemaphoreSlim(maxParallel, maxParallel);
+            var tasks = requestedIps.Select(async ip =>
+            {
+                await semaphore.WaitAsync(_lifetime.Token);
+                try
+                {
+                    await RunDeviceSpeedTestForDeviceAsync(
+                        ip,
+                        baseDirectory,
+                        transports,
+                        layouts,
+                        directions,
+                        rounds,
+                        devtoolsChunkKb * 1024,
+                        filesByLayout,
+                        () =>
+                        {
+                            int completed;
+                            lock (progressLock) completed = ++completedScenarios;
+                            return QueueEventAsync("device.speed.status", new
+                            {
+                                status = "working",
+                                progress = Math.Round(completed * 100d / Math.Max(1, totalScenarios), 1),
+                                completed,
+                                total = totalScenarios,
+                                message = $"测速进度 {completed}/{totalScenarios}",
+                            });
+                        },
+                        _lifetime.Token);
+                }
+                catch (Exception error)
+                {
+                    await QueueEventAsync("device.speed.result", new
+                    {
+                        ip,
+                        error = error.Message,
+                        time = DateTimeOffset.Now,
+                    });
+                    _log.Warn("网速测试", $"{ip} 测速失败：{error.Message}");
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }).ToArray();
+
+            await Task.WhenAll(tasks);
+            await QueueEventAsync("device.speed.status", new
+            {
+                status = "success",
+                done = true,
+                progress = 100,
+                completed = completedScenarios,
+                total = totalScenarios,
+                message = $"网速测试完成：{requestedIps.Length} 台设备",
+            });
+            _log.Info("网速测试", $"多设备测速完成：{string.Join(", ", requestedIps)}");
+        }
+        finally
+        {
+            try { Directory.Delete(tempRoot, true); } catch { }
+        }
+    }
+
+    private async Task RunDeviceSpeedTestForDeviceAsync(
+        string ip,
+        string baseDirectory,
+        IReadOnlyList<string> transports,
+        IReadOnlyList<string> layouts,
+        IReadOnlyList<string> directions,
+        int rounds,
+        int devtoolsChunkBytes,
+        IReadOnlyDictionary<string, List<SpeedTestFile>> filesByLayout,
+        Func<Task> scenarioCompletedAsync,
+        CancellationToken cancellationToken)
+    {
+        var api = RequireDeviceApi();
+        var mode = "";
+        int? rssi = null;
+        try
+        {
+            var state = await api.GetStateAsync(ip, cancellationToken);
+            if (state.TryGetProperty("wifi", out var wifi) && wifi.ValueKind == JsonValueKind.Object)
+            {
+                if (wifi.TryGetProperty("mode", out var modeNode)) mode = modeNode.GetString() ?? "";
+                if (wifi.TryGetProperty("sta_rssi", out var rssiNode) && rssiNode.TryGetInt32(out var parsedRssi)) rssi = parsedRssi;
+            }
+        }
+        catch { }
+
+        if (!baseDirectory.Equals("/sd", StringComparison.OrdinalIgnoreCase))
+        {
+            try { await api.CreateDirectoryAsync(ip, baseDirectory, cancellationToken); } catch { }
+        }
+
+        if (directions.Contains("download") && !directions.Contains("upload"))
+        {
+            foreach (var selectedLayout in layouts)
+            {
+                await EnsureSpeedFilesOnDeviceAsync(ip, filesByLayout[selectedLayout], cancellationToken);
+            }
+        }
+
+        foreach (var selectedTransport in transports)
+        {
+            foreach (var selectedLayout in layouts)
+            {
+                var files = filesByLayout[selectedLayout];
+                foreach (var selectedDirection in directions)
+                {
+                    for (var round = 1; round <= rounds; round++)
+                    {
+                        await QueueEventAsync("device.speed.status", new
+                        {
+                            status = "working",
+                            phase = selectedDirection,
+                            ip,
+                            transport = selectedTransport,
+                            layout = selectedLayout,
+                            direction = selectedDirection,
+                            round,
+                            rounds,
+                            message = $"{ip} {SpeedDirectionLabel(selectedDirection)} {SpeedTransportLabel(selectedTransport)} / {SpeedLayoutLabel(selectedLayout)} {round}/{rounds}",
+                        });
+                        var result = selectedDirection == "upload"
+                            ? await UploadSpeedScenarioAsync(ip, selectedTransport, files, devtoolsChunkBytes, cancellationToken)
+                            : await DownloadSpeedScenarioAsync(ip, selectedTransport, files, devtoolsChunkBytes, cancellationToken);
+                        await QueueEventAsync("device.speed.result", new
+                        {
+                            ip,
+                            mode,
+                            rssi,
+                            direction = selectedDirection,
+                            directionLabel = SpeedDirectionLabel(selectedDirection),
+                            transport = selectedTransport,
+                            transportLabel = SpeedTransportLabel(selectedTransport),
+                            layout = selectedLayout,
+                            layoutLabel = SpeedLayoutLabel(selectedLayout),
+                            round,
+                            rounds,
+                            fileCount = files.Count,
+                            bytes = result.Bytes,
+                            milliseconds = Math.Round(result.Elapsed.TotalMilliseconds, 1),
+                            kbps = Math.Round(result.Bytes / 1024d / Math.Max(0.001, result.Elapsed.TotalSeconds), 1),
+                            time = DateTimeOffset.Now,
+                        });
+                        await scenarioCompletedAsync();
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task EnsureSpeedFilesOnDeviceAsync(
+        string ip,
+        IReadOnlyList<SpeedTestFile> files,
+        CancellationToken cancellationToken)
+    {
+        foreach (var item in files)
+        {
+            await RequireDeviceApi().UploadLocalFileAsync(ip, item.DevicePath, item.LocalPath, cancellationToken);
+        }
+    }
+
+    private async Task<(long Bytes, TimeSpan Elapsed)> UploadSpeedScenarioAsync(
+        string ip,
+        string transport,
+        IReadOnlyList<SpeedTestFile> files,
+        int devtoolsChunkBytes,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        long total = 0;
+        foreach (var item in files)
+        {
+            if (transport == "devtools")
+            {
+                await RequireDeviceApi().UploadLocalFileViaDevToolsAsync(ip, item.DevicePath, item.LocalPath, null, cancellationToken);
+            }
+            else
+            {
+                await RequireDeviceApi().UploadLocalFileAsync(ip, item.DevicePath, item.LocalPath, cancellationToken);
+            }
+            total += item.Size;
+        }
+        stopwatch.Stop();
+        return (total, stopwatch.Elapsed);
+    }
+
+    private async Task<(long Bytes, TimeSpan Elapsed)> DownloadSpeedScenarioAsync(
+        string ip,
+        string transport,
+        IReadOnlyList<SpeedTestFile> files,
+        int devtoolsChunkBytes,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        long total = 0;
+        foreach (var item in files)
+        {
+            var bytes = transport == "devtools"
+                ? await RequireDeviceApi().ReadFileViaDevToolsAsync(ip, item.DevicePath, item.Size, devtoolsChunkBytes, cancellationToken)
+                : await RequireDeviceApi().ReadFileAsync(ip, item.DevicePath, item.Size, cancellationToken);
+            if (bytes.Length != item.Size)
+            {
+                throw new InvalidOperationException($"{SpeedTransportLabel(transport)} 设备传电脑大小不一致：{item.DevicePath}，期望 {item.Size}，实际 {bytes.Length}");
+            }
+            total += bytes.Length;
+        }
+        stopwatch.Stop();
+        return (total, stopwatch.Elapsed);
+    }
+
+    private static Dictionary<string, List<SpeedTestFile>> CreateSpeedTestFiles(
+        string tempRoot,
+        string baseDirectory,
+        IReadOnlyList<string> layouts,
+        int continuousKb,
+        int fragmentKb,
+        int fragmentCount)
+    {
+        var result = new Dictionary<string, List<SpeedTestFile>>(StringComparer.OrdinalIgnoreCase);
+        var prefix = baseDirectory.TrimEnd('/') + "/pcapp_speed_";
+        if (layouts.Contains("continuous"))
+        {
+            var size = checked(continuousKb * 1024);
+            var local = Path.Combine(tempRoot, $"continuous_{continuousKb}k.bin");
+            WritePatternFile(local, size, 17);
+            result["continuous"] = [new SpeedTestFile(local, $"{prefix}continuous_{continuousKb}k.bin", size)];
+        }
+        if (layouts.Contains("fragments"))
+        {
+            var size = checked(fragmentKb * 1024);
+            var files = new List<SpeedTestFile>(fragmentCount);
+            var fragmentRoot = Path.Combine(tempRoot, "fragments");
+            Directory.CreateDirectory(fragmentRoot);
+            for (var index = 0; index < fragmentCount; index++)
+            {
+                var name = $"fragment_{index + 1:D4}_{fragmentKb}k.bin";
+                var local = Path.Combine(fragmentRoot, name);
+                WritePatternFile(local, size, index + 31);
+                files.Add(new SpeedTestFile(local, $"{prefix}{name}", size));
+            }
+            result["fragments"] = files;
+        }
+        return result;
+    }
+
+    private static void WritePatternFile(string path, int size, int seed)
+    {
+        var bytes = new byte[size];
+        for (var index = 0; index < bytes.Length; index++)
+        {
+            bytes[index] = (byte)((index * 31 + seed) % 251);
+        }
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static string SpeedTransportLabel(string transport) =>
+        transport.Equals("devtools", StringComparison.OrdinalIgnoreCase) ? "DevTools" : "FS";
+
+    private static string SpeedLayoutLabel(string layout) =>
+        layout.Equals("fragments", StringComparison.OrdinalIgnoreCase) ? "碎片文件" : "连续文件";
+
+    private static string SpeedDirectionLabel(string direction) =>
+        direction.Equals("upload", StringComparison.OrdinalIgnoreCase) ? "电脑传设备" : "设备传电脑";
+
+    private async Task RunDeviceLatencyTestAsync(BridgeCommand command)
+    {
+        var requestedIps = GetStringList(command, "ips")
+            .Where(ip => IPAddress.TryParse(ip, out _))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (requestedIps.Length == 0) requestedIps = [RequireSelectedDeviceIp()];
+
+        var count = Math.Clamp(GetInt(command, "count", 10), 1, 100);
+        var maxParallel = Math.Clamp(GetInt(command, "parallel", Math.Min(4, requestedIps.Length)), 1, 8);
+        var totalSamples = requestedIps.Length * count;
+        var completedSamples = 0;
+        var progressLock = new object();
+
+        await QueueEventAsync("device.speed.status", new
+        {
+            status = "working",
+            reset = true,
+            progress = 0,
+            completed = 0,
+            total = totalSamples,
+            activeDevices = requestedIps.Length,
+            message = $"开始延迟测试：{requestedIps.Length} 台设备，每台 {count} 次，并发 {maxParallel}",
+        });
+
+        Func<Task> sampleCompletedAsync = () =>
+        {
+            int completed;
+            lock (progressLock) completed = ++completedSamples;
+            return QueueEventAsync("device.speed.status", new
+            {
+                status = "working",
+                progress = Math.Round(completed * 100d / Math.Max(1, totalSamples), 1),
+                completed,
+                total = totalSamples,
+                message = $"延迟测试进度 {completed}/{totalSamples}",
+            });
+        };
+
+        using var semaphore = new SemaphoreSlim(maxParallel, maxParallel);
+        var tasks = requestedIps.Select(async ip =>
+        {
+            await semaphore.WaitAsync(_lifetime.Token);
+            try
+            {
+                await RunLatencyTestForDeviceAsync(ip, count, sampleCompletedAsync, _lifetime.Token);
+            }
+            catch (Exception error)
+            {
+                await QueueEventAsync("device.speed.result", new
+                {
+                    category = "latency",
+                    ip,
+                    direction = "latency",
+                    directionLabel = "延迟测试",
+                    transport = "api",
+                    transportLabel = "System API",
+                    layout = "state",
+                    layoutLabel = "/api/system/state",
+                    samples = count,
+                    failed = count,
+                    failureRate = 100,
+                    error = error.Message,
+                    time = DateTimeOffset.Now,
+                });
+                _log.Warn("延迟测试", $"{ip} 延迟测试失败：{error.Message}");
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }).ToArray();
+
+        await Task.WhenAll(tasks);
+        await QueueEventAsync("device.speed.status", new
+        {
+            status = "success",
+            done = true,
+            progress = 100,
+            completed = completedSamples,
+            total = totalSamples,
+            message = $"延迟测试完成：{requestedIps.Length} 台设备",
+        });
+    }
+
+    private async Task RunLatencyTestForDeviceAsync(
+        string ip,
+        int count,
+        Func<Task> sampleCompletedAsync,
+        CancellationToken cancellationToken)
+    {
+        var api = RequireDeviceApi();
+        var samples = new List<double>(count);
+        var failed = 0;
+        string? lastError = null;
+        var mode = "";
+        int? rssi = null;
+
+        for (var index = 1; index <= count; index++)
+        {
+            await QueueEventAsync("device.speed.status", new
+            {
+                status = "working",
+                phase = "latency",
+                ip,
+                direction = "latency",
+                round = index,
+                rounds = count,
+                message = $"{ip} 延迟测试 {index}/{count}",
+            });
+
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(3));
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var state = await api.GetStateAsync(ip, timeout.Token);
+                stopwatch.Stop();
+                samples.Add(stopwatch.Elapsed.TotalMilliseconds);
+                if (state.TryGetProperty("wifi", out var wifi) && wifi.ValueKind == JsonValueKind.Object)
+                {
+                    if (wifi.TryGetProperty("mode", out var modeNode)) mode = modeNode.GetString() ?? "";
+                    if (wifi.TryGetProperty("sta_rssi", out var rssiNode) && rssiNode.TryGetInt32(out var parsedRssi)) rssi = parsedRssi;
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                failed++;
+                lastError = "请求超时";
+            }
+            catch (Exception error)
+            {
+                failed++;
+                lastError = error.Message;
+            }
+
+            await sampleCompletedAsync();
+        }
+
+        if (samples.Count == 0)
+        {
+            await QueueEventAsync("device.speed.result", new
+            {
+                category = "latency",
+                ip,
+                direction = "latency",
+                directionLabel = "延迟测试",
+                transport = "api",
+                transportLabel = "System API",
+                layout = "state",
+                layoutLabel = "/api/system/state",
+                round = count,
+                rounds = count,
+                samples = count,
+                okCount = 0,
+                failed,
+                failureRate = 100,
+                milliseconds = 0,
+                error = lastError ?? "全部请求失败",
+                time = DateTimeOffset.Now,
+            });
+            return;
+        }
+
+        var ordered = samples.OrderBy(value => value).ToArray();
+        var p95Index = Math.Clamp((int)Math.Ceiling(ordered.Length * 0.95d) - 1, 0, ordered.Length - 1);
+        var jitter = samples.Count > 1
+            ? samples.Zip(samples.Skip(1), (left, right) => Math.Abs(right - left)).Average()
+            : 0;
+
+        await QueueEventAsync("device.speed.result", new
+        {
+            category = "latency",
+            ip,
+            mode,
+            rssi,
+            direction = "latency",
+            directionLabel = "延迟测试",
+            transport = "api",
+            transportLabel = "System API",
+            layout = "state",
+            layoutLabel = "/api/system/state",
+            round = count,
+            rounds = count,
+            samples = count,
+            okCount = samples.Count,
+            failed,
+            failureRate = Math.Round(failed * 100d / Math.Max(1, count), 1),
+            minMs = Math.Round(samples.Min(), 1),
+            avgMs = Math.Round(samples.Average(), 1),
+            p95Ms = Math.Round(ordered[p95Index], 1),
+            maxMs = Math.Round(samples.Max(), 1),
+            jitterMs = Math.Round(jitter, 1),
+            milliseconds = Math.Round(samples.Average(), 1),
+            time = DateTimeOffset.Now,
+        });
+    }
+
     private async Task ReadLuaCodeAsync(string? requestedPath)
     {
         var path = NormalizeLuaPath(requestedPath);
@@ -1347,6 +1887,36 @@ public sealed class AppController : IAsyncDisposable
         return raw is JsonElement element ? element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString() : raw.ToString();
     }
 
+    private static IReadOnlyList<string> GetStringList(BridgeCommand command, string name)
+    {
+        if (!command.Payload.TryGetValue(name, out var raw) || raw is null) return [];
+        if (raw is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Array)
+            {
+                var items = new List<string>();
+                foreach (var item in element.EnumerateArray())
+                {
+                    var value = item.ValueKind == JsonValueKind.String ? item.GetString() : item.ToString();
+                    if (!string.IsNullOrWhiteSpace(value)) items.Add(value.Trim());
+                }
+                return items;
+            }
+            var single = element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString();
+            return string.IsNullOrWhiteSpace(single) ? [] : [single.Trim()];
+        }
+        if (raw is IEnumerable<object?> rawValues && raw is not string)
+        {
+            return rawValues
+                .Select(item => item?.ToString())
+                .Where(text => !string.IsNullOrWhiteSpace(text))
+                .Select(text => text!.Trim())
+                .ToArray();
+        }
+        var text = raw.ToString();
+        return string.IsNullOrWhiteSpace(text) ? [] : [text.Trim()];
+    }
+
     private static bool GetBool(BridgeCommand command, string name)
     {
         if (!command.Payload.TryGetValue(name, out var raw) || raw is null) return false;
@@ -1368,6 +1938,8 @@ public sealed class AppController : IAsyncDisposable
     private void QueueEvent(string type, object? payload) => _ = QueueEventAsync(type, payload);
 
     private Task QueueEventAsync(string type, object? payload) => SendEventAsync?.Invoke(type, payload) ?? Task.CompletedTask;
+
+    private sealed record SpeedTestFile(string LocalPath, string DevicePath, int Size);
 
     public async ValueTask DisposeAsync()
     {

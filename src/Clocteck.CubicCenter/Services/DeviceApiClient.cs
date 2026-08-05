@@ -102,6 +102,59 @@ public sealed class DeviceApiClient : IDisposable
         return output.ToArray();
     }
 
+    public async Task<byte[]> ReadFileViaDevToolsAsync(
+        string ip,
+        string path,
+        int maxBytes,
+        int chunkSize,
+        CancellationToken cancellationToken)
+    {
+        path = NormalizeFsPath(path);
+        maxBytes = Math.Clamp(maxBytes, 1, 64 * 1024 * 1024);
+        chunkSize = Math.Clamp(chunkSize, 1024, 256 * 1024);
+        using var output = new MemoryStream();
+        var offset = 0;
+        while (output.Length < maxBytes)
+        {
+            var size = Math.Min(chunkSize, maxBytes - (int)output.Length);
+            var route = "/devtools/api/read?path=" + Uri.EscapeDataString(path) +
+                        "&offset=" + offset.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                        "&size=" + size.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            using var request = new HttpRequestMessage(HttpMethod.Get, BuildUri(ip, route));
+            request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoStore = true };
+            using var response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var text = await response.Content.ReadAsStringAsync(cancellationToken);
+                var detail = TryReadError(text) ?? response.ReasonPhrase ?? "DevTools read failed";
+                throw new HttpRequestException($"HTTP {(int)response.StatusCode}: {detail}", null, response.StatusCode);
+            }
+
+            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+            var chunkBytes = 0;
+            try
+            {
+                while (true)
+                {
+                    var count = await input.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, maxBytes - (int)output.Length)), cancellationToken);
+                    if (count <= 0) break;
+                    output.Write(buffer, 0, count);
+                    chunkBytes += count;
+                    if (output.Length >= maxBytes) break;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+            if (chunkBytes <= 0) break;
+            offset += chunkBytes;
+            if (chunkBytes < size) break;
+        }
+        return output.ToArray();
+    }
+
     public Task<JsonElement> UploadFileAsync(
         string ip,
         string path,
@@ -612,6 +665,9 @@ public sealed class DeviceApiClient : IDisposable
         "timezone",
         "weather_address",
         "language",
+        "ap_enabled",
+        "autostart_enabled",
+        "autostart_app_id",
         "brightness",
         "auto_sleep_enabled",
         "auto_sleep_seconds",

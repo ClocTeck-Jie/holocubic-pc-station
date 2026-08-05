@@ -5,6 +5,7 @@
         Title="Clocteck Cubic Center"
         Width="1180" Height="760" MinWidth="980" MinHeight="660"
         WindowStartupLocation="CenterScreen"
+        Icon="Assets/app.ico"
         Background="{StaticResource WindowBackground}">
     <Grid>
         <wv2:WebView2 x:Name="WebView" DefaultBackgroundColor="#070909" />

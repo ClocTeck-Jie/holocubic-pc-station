@@ -4,7 +4,8 @@
     services: [], devices: [], selectedDeviceIp: '', control: null, syncedLanguageKey: '',
     catalog: [], catalogDeviceIp: '', catalogLoading: false, currentStoreFilter: 'all', storePendingInstalls: new Map(), pcStoreProgress: new Map(), pcStoreCached: new Map(), storePollTimer: null, firmwarePollTimer: null, provision: null, logs: [], currentPage: 'home', currentControlTab: 'apps',
     serial: null, serialText: '', currentLogView: 'app', currentDeveloperTab: 'lua', mediaKind: 'image',
-    fs: { deviceIp:'', path:'/sd/images', items:[], selected:null, previewText:'' }, fsClipboard:null, loadedLuaCode: '', forceAppFrameReload: false
+    fs: { deviceIp:'', path:'/sd/images', items:[], selected:null, previewText:'' }, fsClipboard:null, loadedLuaCode: '', forceAppFrameReload: false,
+    speedResults: [], speedRunning: false, speedSelectedIps: new Set()
   };
   const pages = {
     home: ['设备总览', '统一连接并管理 Clocteck Cubic'],
@@ -14,6 +15,7 @@
     files: ['文件管理', '管理设备图片、GIF、音乐、歌词和应用文件'],
     serial: ['串口工具', '连接设备串口并实时读取输出信息'],
     devtools: ['设备开发工具', '编辑并运行 DevRun Lua 代码'],
+    speed: ['网速测试', '测试 FS 与 DevTools 接口双向传输速度'],
     logs: ['运行日志', '查看软件运行事件和错误信息'],
     about: ['关于', 'Clocteck Cubic Center'],
   };
@@ -28,7 +30,7 @@
   function gotoPage(name) {
     if (!pages[name]) return;
     state.currentPage = name;
-    const deviceSection = name === 'control' || name === 'files' || name === 'devtools';
+    const deviceSection = name === 'control' || name === 'files' || name === 'devtools' || name === 'speed';
     qa('.page').forEach(page => page.classList.toggle('active', page.id === `page-${name}`));
     qa('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.page === name || (item.dataset.page === 'control' && deviceSection)));
     q('#controlSubmenu').classList.toggle('visible', deviceSection);
@@ -63,6 +65,7 @@
     else if (type === 'device.control.status') setControlStatus(payload?.status, payload?.status === 'working' ? I18n.t('正在读取设备') : payload?.message);
     else if (type === 'device.control') renderControl(payload || {});
     else if (type === 'device.app.starting') renderAppStarting(payload || {});
+    else if (type === 'device.app.confirmed') renderAppConfirmed(payload || {});
     else if (type === 'device.action') renderDeviceAction(payload || {});
     else if (type === 'device.store.status') renderStoreStatus(payload || {});
     else if (type === 'device.store') renderStore(payload || {});
@@ -85,6 +88,8 @@
     else if (type === 'device.fs.preview') renderDeviceFilePreview(payload || {});
     else if (type === 'device.lua.code') renderLuaCode(payload || {});
     else if (type === 'device.lua.saved') renderLuaSaved(payload || {});
+    else if (type === 'device.speed.status') renderSpeedStatus(payload || {});
+    else if (type === 'device.speed.result') renderSpeedResult(payload || {});
     else if (type === 'app.error') {
       state.catalogLoading = false;
       state.storePendingInstalls.clear();
@@ -146,6 +151,9 @@
     q('#developerDeviceBadge').className = `status-tag ${active?.online ? 'running' : ''}`;
     q('#fileManagerDeviceBadge').textContent = active?.ipAddress || I18n.t('请选择设备');
     q('#fileManagerDeviceBadge').className = `status-tag ${active?.online ? 'running' : ''}`;
+    q('#speedTestDeviceBadge').textContent = active?.ipAddress || I18n.t('请选择设备');
+    q('#speedTestDeviceBadge').className = `status-tag ${active?.online ? 'running' : ''}`;
+    renderSpeedDeviceList();
 
     renderOverviewDevices();
     if ((state.currentPage === 'files' || state.currentPage === 'devtools') && active && state.fs.deviceIp !== active.ipAddress) {
@@ -273,6 +281,15 @@
     q('#embeddedAppPlaceholder p').textContent = I18n.t('设备完成应用初始化后会自动打开控制页面。');
   }
 
+  function renderAppConfirmed(payload) {
+    if (payload?.state) {
+      state.control = state.control || {};
+      state.control.state = payload.state;
+      renderDeviceApps(payload.state);
+    }
+    renderAppStarting(payload);
+  }
+
   function renderDeviceAction(payload) {
     if (payload?.action === 'launch') {
       toast(payload.controlReady === false ? I18n.t('应用已启动，控制页可稍后刷新重试') : I18n.t('应用已启动'));
@@ -320,7 +337,7 @@
     q('#deviceAppGrid').innerHTML = apps.length ? apps.map(app => {
       const current = app.id === currentId;
       const storeItem = state.catalog.find(item => item.id === app.id);
-      return `<article class="panel control-card device-app-row ${current ? 'current' : ''}"><div class="control-card-head">${appIconMarkup(storeItem || app)}<div><h3>${escapeHtml(app.name || app.id)}</h3><p>${escapeHtml(app.id || '')} · ${escapeHtml(app.version || I18n.t('未知版本'))}</p></div>${current ? '<span class="status-tag running">运行中</span>' : ''}</div><div class="button-row device-app-actions">${current && currentHasControls ? `<button class="button secondary embed-device-path" data-path="${escapeHtml(currentRoute)}" data-title="${escapeHtml(app.name || app.id)}">控制</button>` : current ? '<span class="service-no-controls">无控制页</span>' : ''}<button class="button ${current ? 'danger exit-device-app' : 'primary launch-device-app'}" data-id="${escapeHtml(app.id)}">${current ? '退出' : '打开'}</button></div></article>`;
+      return `<article class="panel control-card device-app-row ${current ? 'current' : ''}"><div class="control-card-head">${appIconMarkup(storeItem || app)}<div><h3>${escapeHtml(app.name || app.id)}</h3><p>${escapeHtml(app.id || '')} · ${escapeHtml(app.version || I18n.t('未知版本'))}</p></div>${current ? '<span class="status-tag running">运行中</span>' : ''}</div><div class="button-row device-app-actions">${current && currentHasControls ? `<button class="button secondary embed-device-path" data-path="${escapeHtml(currentRoute)}" data-title="${escapeHtml(app.name || app.id)}">控制</button>` : current ? '<span class="service-no-controls">无控制页</span>' : ''}<button class="button ${current ? 'danger exit-device-app' : 'primary launch-device-app'}" data-id="${escapeHtml(app.id)}">${current ? '停止' : '打开'}</button></div></article>`;
     }).join('') : '<div class="panel empty-state">设备没有返回可显示的应用。</div>';
     qa('.launch-device-app').forEach(button => button.addEventListener('click', () => post('device.app.launch', {
       id:button.dataset.id,
@@ -382,12 +399,30 @@
     state.forceAppFrameReload = false;
   }
 
+  function renderAutostartOptions(settings, deviceState) {
+    const select = q('#autostartAppSelect');
+    if (!select) return;
+    const enabled = settings.autostart_enabled !== false;
+    const selected = enabled ? String(settings.autostart_app_id || settings.autostartAppId || '') : '';
+    const apps = installedItems(deviceState).filter(item => String(item.kind || '').toLowerCase() !== 'service' && item.id !== 'launcher');
+    const options = [`<option value="">${escapeHtml(I18n.t('关闭自启动'))}</option>`];
+    apps.forEach(app => options.push(`<option value="${escapeHtml(app.id)}">${escapeHtml(app.name || app.id)}</option>`));
+    if (selected && !apps.some(app => String(app.id) === selected)) {
+      options.push(`<option value="${escapeHtml(selected)}">${escapeHtml(selected)}</option>`);
+    }
+    select.innerHTML = options.join('');
+    select.value = selected;
+  }
+
   function renderDeviceSettings(settings, display, schedule, deviceState) {
     const deviceLanguage = I18n.normalize(settings.language || settings.locale || settings.lang || 'zh-CN');
     if (deviceLanguage !== I18n.language) syncLanguageToDevice();
     q('#weatherAddress').value = settings.weather_address || settings.weatherAddress || '';
     ensureOption(q('#timezoneSelect'), settings.timezone || 'CST-8');
     q('#timezoneSelect').value = settings.timezone || 'CST-8';
+    renderAutostartOptions(settings, deviceState);
+    const apEnabled = settings.ap_enabled ?? settings.apEnabled ?? deviceState?.wifi?.ap_enabled ?? true;
+    q('#apEnabledSelect').value = String(!(apEnabled === false || apEnabled === 'false' || apEnabled === 0));
     const brightness = Number(display?.brightness ?? settings.brightness ?? settings.display_brightness ?? 80);
     q('#brightnessRange').value = Math.max(1, Math.min(100, brightness));
     q('#brightnessValue').textContent = `${q('#brightnessRange').value}%`;
@@ -952,6 +987,247 @@
     return `${size} B`;
   }
 
+  function renderSpeedStatus(payload) {
+    const status = q('#speedTestStatus');
+    if (!status) return;
+    if (payload.reset) {
+      state.speedResults = [];
+      setSpeedProgress(0, '0%');
+      renderSpeedResults();
+    }
+    state.speedRunning = payload.status === 'working';
+    q('#startSpeedTest').disabled = state.speedRunning;
+    q('#startLatencyTest').disabled = state.speedRunning;
+    status.textContent = payload.message || (state.speedRunning ? '正在测试…' : '等待开始测试。');
+    status.className = `speed-status ${payload.status || ''}`;
+    if (payload.total) {
+      const completed = Number(payload.completed || 0);
+      const total = Math.max(1, Number(payload.total || 1));
+      const percent = Math.max(0, Math.min(100, completed * 100 / total));
+      setSpeedProgress(percent, `${completed}/${total} · ${percent.toFixed(0)}%`);
+    } else if (payload.done) {
+      setSpeedProgress(100, '完成');
+    }
+    if (payload.done) toast(payload.message || '网速测试完成');
+  }
+
+  function renderSpeedResult(payload) {
+    state.speedResults.unshift({
+      category: payload.category || 'transfer',
+      ip: payload.ip || state.selectedDeviceIp,
+      mode: payload.mode || '',
+      rssi: payload.rssi == null ? '' : payload.rssi,
+      direction: payload.direction || '',
+      directionLabel: payload.directionLabel || (payload.direction === 'upload' ? '电脑传设备' : '设备传电脑'),
+      transport: payload.transport || '',
+      transportLabel: payload.transportLabel || payload.transport || '',
+      layout: payload.layout || '',
+      layoutLabel: payload.layoutLabel || payload.layout || '',
+      round: Number(payload.round || 0),
+      rounds: Number(payload.rounds || 0),
+      fileCount: Number(payload.fileCount || 0),
+      bytes: Number(payload.bytes || 0),
+      milliseconds: Number(payload.milliseconds || 0),
+      kbps: Number(payload.kbps || 0),
+      samples: Number(payload.samples || 0),
+      okCount: Number(payload.okCount || 0),
+      failed: Number(payload.failed || 0),
+      failureRate: Number(payload.failureRate || 0),
+      minMs: Number(payload.minMs || 0),
+      avgMs: Number(payload.avgMs || 0),
+      p95Ms: Number(payload.p95Ms || 0),
+      maxMs: Number(payload.maxMs || 0),
+      jitterMs: Number(payload.jitterMs || 0),
+      error: payload.error || '',
+      time: new Date().toLocaleTimeString('zh-CN', { hour12:false }),
+    });
+    state.speedResults = state.speedResults.slice(0, 400);
+    renderSpeedResults();
+  }
+
+  function setSpeedProgress(percent, text) {
+    const fill = q('#speedProgressFill');
+    const label = q('#speedProgressText');
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, Number(percent || 0)))}%`;
+    if (label) label.textContent = text || `${Number(percent || 0).toFixed(0)}%`;
+  }
+
+  function renderSpeedDeviceList() {
+    const host = q('#speedDeviceList');
+    if (!host) return;
+    const knownIps = new Set(state.devices.map(device => device.ipAddress));
+    state.speedSelectedIps = new Set([...state.speedSelectedIps].filter(ip => knownIps.has(ip)));
+    if (!state.speedSelectedIps.size && state.selectedDeviceIp) state.speedSelectedIps.add(state.selectedDeviceIp);
+    if (!state.devices.length) {
+      host.innerHTML = '<div class="speed-empty compact">暂无设备，请先添加或刷新设备。</div>';
+      return;
+    }
+    host.innerHTML = state.devices.map(device => {
+      const checked = state.speedSelectedIps.has(device.ipAddress);
+      const disabled = !device.online;
+      return `<label class="speed-device-option ${checked ? 'selected' : ''} ${disabled ? 'offline' : ''}">
+        <input class="speed-device-check" type="checkbox" value="${escapeHtml(device.ipAddress)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
+        <span><b>${escapeHtml(device.ipAddress)}</b><small>${escapeHtml(device.name || 'Clocteck Cubic')} · ${device.online ? '在线' : '离线'}${device.rssi == null ? '' : ` · ${device.rssi} dBm`}</small></span>
+      </label>`;
+    }).join('');
+    qa('.speed-device-check').forEach(input => input.addEventListener('change', () => {
+      if (input.checked) state.speedSelectedIps.add(input.value);
+      else state.speedSelectedIps.delete(input.value);
+      renderSpeedDeviceList();
+    }));
+  }
+
+  function selectedSpeedIps() {
+    const onlineIps = new Set(state.devices.filter(device => device.online).map(device => device.ipAddress));
+    const selected = [...state.speedSelectedIps].filter(ip => onlineIps.has(ip));
+    if (selected.length) return selected;
+    const active = selectedDevice();
+    return active?.online ? [active.ipAddress] : [];
+  }
+
+  function renderSpeedResults() {
+    const host = q('#speedResultList');
+    if (!host) return;
+    const validRows = state.speedResults.filter(item => !item.error && Number.isFinite(item.kbps) && item.kbps > 0);
+    const by = (transport, direction) => validRows.filter(item => item.transport === transport && item.direction === direction);
+    const average = rows => rows.length ? rows.reduce((sum, item) => sum + item.kbps, 0) / rows.length : 0;
+    const setAverage = (id, rows) => { q(id).textContent = rows.length ? `${average(rows).toFixed(1)} KB/S` : '-- KB/S'; };
+    setAverage('#speedFsUploadAverage', by('fs', 'upload'));
+    setAverage('#speedFsDownloadAverage', by('fs', 'download'));
+    setAverage('#speedDevtoolsUploadAverage', by('devtools', 'upload'));
+    setAverage('#speedDevtoolsDownloadAverage', by('devtools', 'download'));
+    const latencyRows = state.speedResults.filter(item => item.category === 'latency' && !item.error && Number.isFinite(item.avgMs) && item.avgMs > 0);
+    q('#speedLatencyAverage').textContent = latencyRows.length ? `${(latencyRows.reduce((sum, item) => sum + item.avgMs, 0) / latencyRows.length).toFixed(1)} ms` : '-- ms';
+    const latest = state.speedResults[0];
+    q('#speedLastResult').textContent = latest ? latestSpeedText(latest) : '--';
+    renderSpeedDeviceSummary();
+    if (!state.speedResults.length) {
+      host.innerHTML = '<div class="speed-empty">暂无测速结果。</div>';
+      return;
+    }
+    host.innerHTML = `<table><thead><tr><th>时间</th><th>设备</th><th>RSSI</th><th>方向</th><th>接口</th><th>类型</th><th>轮次</th><th>文件</th><th>大小</th><th>耗时</th><th>速度 / 状态</th></tr></thead><tbody>${state.speedResults.map(item => `
+      <tr class="${item.error ? 'speed-error-row' : ''}">
+        <td>${escapeHtml(item.time)}</td>
+        <td>${escapeHtml(item.ip)}</td>
+        <td>${item.rssi === '' ? '--' : `${escapeHtml(item.rssi)} dBm`}</td>
+        <td>${escapeHtml(item.directionLabel)}</td>
+        <td>${escapeHtml(item.transportLabel)}</td>
+        <td>${escapeHtml(item.layoutLabel)}</td>
+        <td>${item.round}/${item.rounds}</td>
+        <td>${item.category === 'latency' ? `${item.okCount}/${item.samples}` : item.fileCount}</td>
+        <td>${item.category === 'latency' ? '--' : formatFsBytes(item.bytes)}</td>
+        <td>${item.milliseconds.toFixed(1)} ms</td>
+        <td>${renderSpeedMetricCell(item)}</td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+
+  function renderSpeedDeviceSummary() {
+    const host = q('#speedDeviceSummary');
+    if (!host) return;
+    if (!state.speedResults.length) {
+      host.innerHTML = '<div class="speed-empty compact">暂无汇总数据。</div>';
+      return;
+    }
+    const ips = [...new Set(state.speedResults.map(item => item.ip).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric:true }));
+    const rows = ips.map(ip => buildSpeedDeviceSummary(ip));
+    host.innerHTML = `<table class="speed-visual-table">
+      <thead><tr><th>设备</th><th>RSSI</th><th>网络质量</th><th>API 延迟</th><th>FS 电脑传设备</th><th>FS 设备传电脑</th><th>DevTools 电脑传设备</th><th>DevTools 设备传电脑</th><th>最近错误</th></tr></thead>
+      <tbody>${rows.map(summary => `
+        <tr class="quality-${summary.quality.level}">
+          <td><b>${escapeHtml(summary.ip)}</b><small>${summary.resultCount} 条结果 · ${escapeHtml(summary.deviceName)}</small></td>
+          <td>${summary.rssiText}</td>
+          <td><span class="speed-quality-pill ${summary.quality.level}">${summary.quality.label}</span><small>${escapeHtml(summary.quality.reason)}</small></td>
+          <td>${renderLatencySummaryCell(summary.latency)}</td>
+          <td>${renderTransferSummaryCell(summary.fsUpload)}</td>
+          <td>${renderTransferSummaryCell(summary.fsDownload)}</td>
+          <td>${renderTransferSummaryCell(summary.devtoolsUpload)}</td>
+          <td>${renderTransferSummaryCell(summary.devtoolsDownload)}</td>
+          <td>${summary.lastError ? `<span class="speed-error-text">${escapeHtml(summary.lastError)}</span>` : '<span class="speed-muted">无</span>'}</td>
+        </tr>`).join('')}</tbody>
+    </table>`;
+  }
+
+  function buildSpeedDeviceSummary(ip) {
+    const rows = state.speedResults.filter(item => item.ip === ip);
+    const device = state.devices.find(item => item.ipAddress === ip);
+    const latestRssi = rows.find(item => item.rssi !== '' && item.rssi != null)?.rssi ?? device?.rssi;
+    const latency = rows.find(item => item.category === 'latency' && !item.error && item.avgMs > 0) || null;
+    const lastError = rows.find(item => item.error)?.error || '';
+    const summary = {
+      ip,
+      deviceName: device?.name || 'Clocteck Cubic',
+      resultCount: rows.length,
+      rssi: latestRssi,
+      rssiText: latestRssi == null || latestRssi === '' ? '<span class="speed-muted">--</span>' : `<b>${escapeHtml(latestRssi)} dBm</b>`,
+      latency,
+      fsUpload: summarizeTransfer(rows, 'fs', 'upload'),
+      fsDownload: summarizeTransfer(rows, 'fs', 'download'),
+      devtoolsUpload: summarizeTransfer(rows, 'devtools', 'upload'),
+      devtoolsDownload: summarizeTransfer(rows, 'devtools', 'download'),
+      lastError,
+    };
+    summary.quality = rateSpeedDevice(summary);
+    return summary;
+  }
+
+  function summarizeTransfer(rows, transport, direction) {
+    const valid = rows.filter(item => item.category !== 'latency' && !item.error && item.transport === transport && item.direction === direction && Number.isFinite(item.kbps) && item.kbps > 0);
+    const continuous = valid.filter(item => item.layout === 'continuous');
+    const fragments = valid.filter(item => item.layout === 'fragments');
+    return {
+      count: valid.length,
+      average: averageNumber(valid, 'kbps'),
+      continuous: averageNumber(continuous, 'kbps'),
+      fragments: averageNumber(fragments, 'kbps'),
+    };
+  }
+
+  function averageNumber(rows, key) {
+    const values = rows.map(item => Number(item[key])).filter(Number.isFinite);
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  }
+
+  function renderTransferSummaryCell(data) {
+    if (!data.count) return '<span class="speed-muted">待测</span>';
+    const continuous = data.continuous ? `${data.continuous.toFixed(1)}` : '--';
+    const fragments = data.fragments ? `${data.fragments.toFixed(1)}` : '--';
+    return `<b>${data.average.toFixed(1)} KB/S</b><small>连续 ${continuous} · 碎片 ${fragments}</small>`;
+  }
+
+  function renderLatencySummaryCell(item) {
+    if (!item) return '<span class="speed-muted">待测</span>';
+    return `<b>${item.avgMs.toFixed(1)} ms</b><small>P95 ${item.p95Ms.toFixed(1)} · 抖动 ${item.jitterMs.toFixed(1)} · 失败 ${item.failed}/${item.samples}</small>`;
+  }
+
+  function rateSpeedDevice(summary) {
+    const rssi = Number(summary.rssi);
+    const latency = summary.latency;
+    const hasTransfer = [summary.fsUpload, summary.fsDownload, summary.devtoolsUpload, summary.devtoolsDownload].some(item => item.count);
+    if (summary.lastError && !latency && !hasTransfer) return { level:'bad', label:'异常', reason:'测试失败或设备未响应' };
+    if (!latency && !hasTransfer) return { level:'neutral', label:'待测', reason:'还没有可用测试结果' };
+    const avg = latency?.avgMs || 0;
+    const p95 = latency?.p95Ms || 0;
+    const jitter = latency?.jitterMs || 0;
+    const fail = latency?.failureRate || 0;
+    if (fail >= 20 || avg >= 250 || p95 >= 500 || jitter >= 150 || Number.isFinite(rssi) && rssi <= -82) return { level:'bad', label:'异常', reason:'延迟/失败率/RSSI 至少一项偏差' };
+    if (fail > 0 || avg >= 100 || p95 >= 220 || jitter >= 60 || Number.isFinite(rssi) && rssi <= -72) return { level:'warn', label:'一般', reason:'可用，但存在波动或信号偏弱' };
+    return { level:'good', label:'良好', reason:'延迟、抖动和信号处于正常范围' };
+  }
+
+  function latestSpeedText(item) {
+    if (item.error) return `${item.ip} 失败`;
+    if (item.category === 'latency') return `${item.ip} 平均 ${item.avgMs.toFixed(1)} ms`;
+    return `${item.ip} ${item.directionLabel} ${item.kbps.toFixed(1)} KB/S`;
+  }
+
+  function renderSpeedMetricCell(item) {
+    if (item.error) return `<span class="speed-error-text">${escapeHtml(item.error)}</span>`;
+    if (item.category === 'latency') {
+      return `<b>${item.avgMs.toFixed(1)} ms</b><small>min ${item.minMs.toFixed(1)} / P95 ${item.p95Ms.toFixed(1)} / max ${item.maxMs.toFixed(1)} / jitter ${item.jitterMs.toFixed(1)} / 失败 ${item.failed} (${item.failureRate.toFixed(1)}%)</small>`;
+    }
+    return `<b>${item.kbps.toFixed(1)} KB/S</b>`;
+  }
+
   function updateLuaMeta() {
     const editor = q('#luaCodeEditor');
     const lines = editor.value ? editor.value.split('\n').length : 1;
@@ -1054,10 +1330,14 @@
     const wakeTime = parseTimeValue(q('#scheduledWakeTime').value, 7);
     q('#settingsSaveHint').textContent = '保存中…';
     const language = I18n.language;
+    const autostartAppId = q('#autostartAppSelect').value;
     post('device.settings.save', {
       timezone:q('#timezoneSelect').value,
       weather_address:q('#weatherAddress').value.trim(),
       language,
+      ap_enabled:q('#apEnabledSelect').value === 'true',
+      autostart_enabled:Boolean(autostartAppId),
+      autostart_app_id:autostartAppId,
       brightness:Number(q('#brightnessRange').value),
       auto_sleep_enabled:seconds > 0,
       auto_sleep_seconds:seconds > 0 ? seconds : 1800,
@@ -1072,6 +1352,47 @@
     });
   });
   q('#clearLogs').addEventListener('click', () => { state.logs = []; renderLogs(); });
+  q('#speedSelectCurrentDevice').addEventListener('click', () => {
+    state.speedSelectedIps = new Set(state.selectedDeviceIp ? [state.selectedDeviceIp] : []);
+    renderSpeedDeviceList();
+  });
+  q('#speedSelectAllDevices').addEventListener('click', () => {
+    state.speedSelectedIps = new Set(state.devices.filter(device => device.online).map(device => device.ipAddress));
+    renderSpeedDeviceList();
+  });
+  q('#speedTestForm').addEventListener('submit', event => {
+    event.preventDefault();
+    const ips = selectedSpeedIps();
+    if (!ips.length) return toast('请先选择至少一台在线设备', true);
+    post('device.speed.test', {
+      ips,
+      direction:q('#speedDirection').value,
+      transport:q('#speedTransport').value,
+      layout:q('#speedLayout').value,
+      rounds:Number(q('#speedRounds').value || 2),
+      parallel:Number(q('#speedParallel').value || 4),
+      continuousKb:Number(q('#speedContinuousKb').value || 1024),
+      fragmentCount:Number(q('#speedFragmentCount').value || 64),
+      fragmentKb:Number(q('#speedFragmentKb').value || 4),
+      devtoolsChunkKb:Number(q('#speedDevtoolsChunkKb').value || 64),
+      path:q('#speedTestPath').value.trim() || '/sd'
+    });
+  });
+  q('#startLatencyTest').addEventListener('click', () => {
+    const ips = selectedSpeedIps();
+    if (!ips.length) return toast('请先选择至少一台在线设备', true);
+    post('device.latency.test', {
+      ips,
+      count:Number(q('#speedLatencyCount').value || 10),
+      parallel:Number(q('#speedParallel').value || 4)
+    });
+  });
+  q('#clearSpeedResults').addEventListener('click', () => {
+    state.speedResults = [];
+    renderSpeedResults();
+    setSpeedProgress(0, '0%');
+    q('#speedTestStatus').textContent = '等待开始测试。';
+  });
   q('#controlRefreshButton').addEventListener('click', () => { state.forceAppFrameReload = true; });
   qa('[data-log-view]').forEach(button => button.addEventListener('click', () => {
     state.currentLogView = button.dataset.logView || 'app';
