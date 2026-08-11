@@ -12,7 +12,18 @@ Holocubic PC Station 是面向 Clocteck Cubic / Holocubic 设备的 Windows 电�
 - 通过固件 FS API 浏览、上传、下载、重命名、复制和删除设备文件。
 - 上传图片或 GIF 时按设备屏幕比例处理媒体；Lua 文件可跳转到开发工具编辑。
 - 串口实时输出、软件运行日志和 Lua 开发工具。
+- 通过 USB 串口为设备扫描 WiFi 并发送配网信息，无需让电脑切换到设备热点。
+- 对多台设备执行 FS、DevTools 或 RAM 网络吞吐、碎片文件和 API 延迟测试。
+- 配置并启动 320 × 240 桌面投屏服务，支持显示器、虚拟副屏和指定区域。
 - 内置 Holo PC Monitor、Holopet、Codex Buddy 和 SMTC Music 等电脑端兼容服务。
+
+## 0.1.0 更新内容
+
+- 首个公开发布版本，提供设备发现、应用管理、应用商店、设备设置和服务管理。
+- 新增固件 FS 文件管理、Lua 编辑、串口日志、网络测速和固件更新界面。
+- 集成 Holo PC Monitor、Holopet、Codex Buddy、SMTC Music 与桌面投屏电脑服务。
+- 新增 WiFi Setting Guide USB 串口配网流程，扫描时自动连接串口并显示准确的密码错误信息。
+- 支持按设备 IP 管理多台设备，并根据设备当前应用自动启动或停止对应电脑服务。
 
 ## 环境要求
 
@@ -20,8 +31,15 @@ Holocubic PC Station 是面向 Clocteck Cubic / Holocubic 设备的 Windows 电�
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - Microsoft Edge WebView2 Runtime
 - 可选：Node.js 24 或兼容版本，仅 SMTC Music 服务需要
+- 从源码运行桌面投屏时需要 Python 3.12、Pillow 和 mss；Release ZIP 已内置所需 Python 环境
 
 应用管理、文件管理和设备设置不依赖 Node.js。
+
+桌面投屏源码依赖可通过以下命令安装：
+
+```powershell
+py -3 -m pip install -r .\src\Clocteck.CubicCenter\CompanionServices\desktop-mirror\requirements.txt
+```
 
 ## 编译运行
 

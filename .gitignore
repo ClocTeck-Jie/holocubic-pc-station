@@ -13,6 +13,8 @@ publish/
 
 # Bundled third-party runtime (use system Node.js in source builds)
 **/CompanionServices/node/node.exe
+**/CompanionServices/desktop-mirror/python/
+**/__pycache__/
 
 # IDE and OS files
 .vs/

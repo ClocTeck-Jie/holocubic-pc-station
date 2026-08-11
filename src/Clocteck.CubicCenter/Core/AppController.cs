@@ -17,7 +17,6 @@ public sealed class AppController : IAsyncDisposable
     private AppSettings _settings = new();
     private NativeWifiService? _wifi;
     private DeviceDiscoveryService? _discovery;
-    private ProvisioningCoordinator? _provisioning;
     private BuiltinApiServer? _builtIn;
     private ManagedServiceManager? _services;
     private HoloPcMonitorConfigurator? _holoMonitor;
@@ -34,10 +33,15 @@ public sealed class AppController : IAsyncDisposable
     private readonly SemaphoreSlim _holoMonitorConfigLock = new(1, 1);
     private string? _lastHolopetConfigKey;
     private string? _lastSmtcMusicConfigKey;
+    private string? _lastDesktopMirrorConfigKey;
     private string? _lastObservedDeviceAppKey;
     private string? _currentUiLanguage;
     private readonly HashSet<string> _manuallyStoppedServices = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _servicePolicyLock = new();
+    private readonly SemaphoreSlim _wifiSerialHandshakeLock = new(1, 1);
+    private TaskCompletionSource<bool>? _wifiSerialReadySignal;
+    private string? _wifiSerialScanRequestId;
+    private string? _wifiSerialProvisionRequestId;
 
     public event EventHandler<string>? BrowserRequested;
     public event EventHandler? ExitRequested;
@@ -59,16 +63,10 @@ public sealed class AppController : IAsyncDisposable
         _serial = new SerialMonitorService();
         _serial.StatusChanged += (_, snapshot) => QueueEvent("serial.status", snapshot);
         _serial.TextReceived += (_, chunk) => QueueEvent("serial.data", chunk);
+        _serial.ProtocolReceived += (_, message) => HandleSerialProtocol(message);
         try
         {
             _wifi = new NativeWifiService(_log);
-            _provisioning = new ProvisioningCoordinator(_wifi, _discovery, _log, _settings, SaveSettingsAsync);
-            _provisioning.StatusChanged += (_, status) => QueueEvent("provision.status", status);
-            _provisioning.OpenBrowserRequested += (_, url) => BrowserRequested?.Invoke(this, url);
-            _provisioning.DeviceFound += (_, device) =>
-            {
-                _ = RegisterProvisionedDeviceAsync(device);
-            };
             _log.Info("Wi-Fi", "Windows WLAN 服务已就绪");
         }
         catch (Exception error)
@@ -98,20 +96,11 @@ public sealed class AppController : IAsyncDisposable
                 case "app.bootstrap":
                     await SendBootstrapAsync();
                     break;
-                case "wifi.scan":
-                    await ScanWifiAsync();
+                case "wifi.serial.scan":
+                    await ScanWifiOverSerialAsync(GetString(command, "port"), GetInt(command, "baud", 115200));
                     break;
-                case "provision.start":
-                    RequireProvisioning();
-                    _ = _provisioning!.BeginAsync(GetString(command, "ssid"));
-                    break;
-                case "provision.forceComplete":
-                    RequireProvisioning();
-                    _ = _provisioning!.ForceCompleteAsync();
-                    break;
-                case "provision.cancel":
-                    RequireProvisioning();
-                    _ = _provisioning!.CancelAndRestoreAsync();
+                case "wifi.serial.provision":
+                    await ProvisionWifiOverSerialAsync(RequireString(command, "ssid"), GetString(command, "pwd") ?? string.Empty);
                     break;
                 case "device.discover":
                     _ = DiscoverDeviceAsync();
@@ -250,6 +239,9 @@ public sealed class AppController : IAsyncDisposable
                 case "services.autoStart":
                     await RequireServices().SetAutoStartAsync(RequireString(command, "id"), GetBool(command, "enabled"));
                     break;
+                case "desktopMirror.settings.save":
+                    await SaveDesktopMirrorSettingsAsync(command);
+                    break;
                 case "app.exit":
                     ExitRequested?.Invoke(this, EventArgs.Empty);
                     break;
@@ -280,27 +272,105 @@ public sealed class AppController : IAsyncDisposable
             wifi = connection,
             devices = _settings.Devices.OrderByDescending(device => device.LastSeen),
             selectedDeviceIp = SelectedDeviceIp,
-            provision = _provisioning?.Current ?? new ProvisioningSnapshot("unavailable", "电脑没有可用的 WLAN 服务", 0),
             services = _services is null ? [] : await _services.SnapshotAsync(),
             stats = _stats.GetSnapshot(),
             hardware = _builtIn?.GetHardwareSnapshot(),
+            desktopMirror = _settings.DesktopMirror,
             logs = _log.Snapshot(),
             serial = _serial?.Snapshot(),
         });
     }
 
-    private async Task ScanWifiAsync()
+    private async Task ScanWifiOverSerialAsync(string? preferredPort, int baudRate)
     {
-        RequireProvisioning();
+        var serial = RequireSerial();
+        var snapshot = serial.Refresh();
+        if (!snapshot.Connected)
+        {
+            var port = !string.IsNullOrWhiteSpace(preferredPort) &&
+                       snapshot.Ports.Contains(preferredPort, StringComparer.OrdinalIgnoreCase)
+                ? preferredPort
+                : snapshot.Ports.FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(port))
+            {
+                throw new InvalidOperationException("没有发现可用的设备串口。");
+            }
+            baudRate = Math.Clamp(baudRate, 1200, 3_000_000);
+            await QueueEventAsync("wifi.serial.status", new
+            {
+                status = "waiting",
+                message = $"正在自动连接串口 {port}",
+            });
+            snapshot = serial.Connect(port, baudRate);
+            _log.Info("串口配网", $"扫描 Wi-Fi 前已自动连接 {port} @ {baudRate}");
+            await QueueEventAsync("serial.status", snapshot);
+        }
+        await EnsureWifiGuideSerialReadyAsync();
+        var id = Guid.NewGuid().ToString("N");
+        _wifiSerialScanRequestId = id;
+        serial.SendLine("@CUBIC_WIFI/1 " + JsonSerializer.Serialize(new { cmd = "scan", id }));
+        await QueueEventAsync("wifi.serial.status", new { id, status = "sent", message = "正在请求设备扫描 Wi-Fi" });
+    }
+
+    private async Task ProvisionWifiOverSerialAsync(string ssid, string password)
+    {
+        ssid = ssid.Trim();
+        if (ssid.Length is < 1 or > 64) throw new ArgumentException("Wi-Fi 名称长度无效。");
+        if (password.Length > 128) throw new ArgumentException("Wi-Fi 密码长度无效。");
+        var serial = RequireSerial();
+        await EnsureWifiGuideSerialReadyAsync();
+        var id = Guid.NewGuid().ToString("N");
+        _wifiSerialProvisionRequestId = id;
+        serial.SendLine("@CUBIC_WIFI/1 " + JsonSerializer.Serialize(new { cmd = "provision", id, ssid, pwd = password }));
+        _log.Info("串口配网", $"已发送 Wi-Fi 凭据：{ssid}（密码已隐藏）");
+        await QueueEventAsync("wifi.serial.status", new { id, status = "sent", ssid, message = "已通过串口发送，等待设备连接" });
+    }
+
+    private void HandleSerialProtocol(SerialProtocolMessage message)
+    {
         try
         {
-            var networks = await _provisioning!.ScanDeviceNetworksAsync(_lifetime.Token);
-            await QueueEventAsync("wifi.networks", networks);
+            using var doc = JsonDocument.Parse(message.Json);
+            var root = doc.RootElement;
+            var status = root.TryGetProperty("status", out var statusNode) ? statusNode.GetString() : null;
+            var protocolApp = root.TryGetProperty("app", out var appNode) ? appNode.GetString() : null;
+            var responseId = root.TryGetProperty("id", out var idNode) ? idNode.GetString() : null;
+            if (string.Equals(status, "ready", StringComparison.OrdinalIgnoreCase) &&
+                (string.Equals(protocolApp, "serial_wifi_setup", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(protocolApp, "wifi_guide", StringComparison.OrdinalIgnoreCase)))
+            {
+                _wifiSerialReadySignal?.TrySetResult(true);
+                QueueEvent("wifi.serial.status", root.Clone());
+                return;
+            }
+
+            var matchesScan = !string.IsNullOrWhiteSpace(responseId) &&
+                              string.Equals(responseId, _wifiSerialScanRequestId, StringComparison.Ordinal);
+            var matchesProvision = !string.IsNullOrWhiteSpace(responseId) &&
+                                   string.Equals(responseId, _wifiSerialProvisionRequestId, StringComparison.Ordinal);
+            if (!matchesScan && !matchesProvision) return;
+
+            if (matchesScan && string.Equals(status, "scan_result", StringComparison.OrdinalIgnoreCase) &&
+                root.TryGetProperty("networks", out var networks))
+            {
+                QueueEvent("wifi.networks", new
+                {
+                    networks = networks.Clone(),
+                    currentSsid = root.TryGetProperty("current_ssid", out var currentSsid) ? currentSsid.GetString() : null,
+                });
+            }
+            if (string.Equals(status, "scan_result", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(status, "success", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(status, "error", StringComparison.OrdinalIgnoreCase))
+            {
+                if (matchesScan) _wifiSerialScanRequestId = null;
+                if (matchesProvision) _wifiSerialProvisionRequestId = null;
+            }
+            QueueEvent("wifi.serial.status", root.Clone());
         }
-        catch (Exception error)
+        catch (JsonException error)
         {
-            _log.Error("Wi-Fi扫描", error.Message);
-            await QueueEventAsync("wifi.networks", Array.Empty<WifiNetwork>());
+            _log.Warn("串口配网", "忽略无效协议帧：" + error.Message);
         }
     }
 
@@ -471,6 +541,12 @@ public sealed class AppController : IAsyncDisposable
             return;
         }
 
+        if (serviceId == "desktop-mirror")
+        {
+            await ConfigureDesktopMirrorAsync(ip, forceConfiguration);
+            return;
+        }
+
         if (serviceId == "smtc-music" && _smtcMusic is not null)
         {
             var smtcRoute = ReadJsonText(state, "current_route_base") ?? "/smtc_music";
@@ -547,7 +623,70 @@ public sealed class AppController : IAsyncDisposable
         if (serviceId.Equals("holopet", StringComparison.OrdinalIgnoreCase)) _lastHolopetConfigKey = null;
         if (serviceId.Equals("smtc-music", StringComparison.OrdinalIgnoreCase)) _lastSmtcMusicConfigKey = null;
         if (serviceId.Equals("pc-monitor", StringComparison.OrdinalIgnoreCase)) _holoMonitorConfigKey = null;
+        if (serviceId.Equals("desktop-mirror", StringComparison.OrdinalIgnoreCase)) _lastDesktopMirrorConfigKey = null;
         await RequireServices().StopAsync(serviceId);
+    }
+
+    private async Task ConfigureDesktopMirrorAsync(string deviceIp, bool force)
+    {
+        var computerIp = ComputerNetworkService.Resolve(null, deviceIp)?.Ipv4Address;
+        var port = _settings.Workers.FirstOrDefault(worker => worker.Id == "desktop-mirror")?.Port ?? 8787;
+        if (string.IsNullOrWhiteSpace(computerIp))
+        {
+            await QueueEventAsync("desktopMirror.config", new
+            {
+                status = "error",
+                message = "找不到可访问设备的电脑 IPv4 地址",
+                deviceIp,
+                port,
+            });
+            return;
+        }
+
+        var configKey = $"{deviceIp}|{computerIp}|{port}";
+        if (!force && string.Equals(_lastDesktopMirrorConfigKey, configKey, StringComparison.Ordinal)) return;
+
+        var payload = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            url = $"ws://{computerIp}:{port}",
+            ws_buffer = 32768,
+            overlay = false,
+            serial_debug = true,
+            serial_debug_every = 1,
+            serial_debug_interval_ms = 5000,
+        });
+        try
+        {
+            await RequireDeviceApi().UploadFileAsync(
+                deviceIp,
+                "/sd/apps/desktop_mirror/config.json",
+                new System.Text.UTF8Encoding(false).GetBytes(payload),
+                "application/json; charset=utf-8",
+                _lifetime.Token);
+            _lastDesktopMirrorConfigKey = configKey;
+            _log.Info("桌面投屏", $"已通过 FS 同步设备配置 ws://{computerIp}:{port}");
+            await QueueEventAsync("desktopMirror.config", new
+            {
+                status = "success",
+                message = "投屏配置已通过 FS 同步",
+                deviceIp,
+                computerIp,
+                port,
+                url = $"ws://{computerIp}:{port}",
+            });
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException)
+        {
+            _log.Warn("桌面投屏", $"FS 同步投屏配置失败：{error.Message}");
+            await QueueEventAsync("desktopMirror.config", new
+            {
+                status = "error",
+                message = error.Message,
+                deviceIp,
+                computerIp,
+                port,
+            });
+        }
     }
 
     private async Task SynchronizeCurrentDeviceAppAsync(string? ip, bool force)
@@ -616,6 +755,25 @@ public sealed class AppController : IAsyncDisposable
 
     private void ConfigureBundledWorkers()
     {
+        var mirror = _settings.Workers.FirstOrDefault(item => item.Id.Equals("desktop-mirror", StringComparison.OrdinalIgnoreCase));
+        if (mirror is not null)
+        {
+            var mirrorDirectory = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "desktop-mirror");
+            var bundledPython = Path.Combine(mirrorDirectory, "python", "python.exe");
+            mirror.Executable = File.Exists(bundledPython) ? bundledPython : "python.exe";
+            var mirrorSettings = _settings.DesktopMirror ?? new DesktopMirrorSettings();
+            var source = mirrorSettings.Source is "virtual-monitor" or "region" ? mirrorSettings.Source : "screen";
+            var args = $"\"{Path.Combine(mirrorDirectory, "desktop_mirror_server.py")}\" --host 0.0.0.0 --port 8787 --source {source} --monitor {Math.Clamp(mirrorSettings.Monitor, 1, 16)} --fps {Math.Clamp(mirrorSettings.Fps, 1, 30)} --quality {Math.Clamp(mirrorSettings.Quality, 1, 95)} --width 320 --height 240 --fit {NormalizeMirrorFit(mirrorSettings.Fit)}";
+            if (source == "virtual-monitor" && !string.IsNullOrWhiteSpace(mirrorSettings.MonitorResolution)) args += $" --monitor-resolution {mirrorSettings.MonitorResolution}";
+            if (source == "region" && !string.IsNullOrWhiteSpace(mirrorSettings.Region)) args += $" --region {mirrorSettings.Region}";
+            mirror.Arguments = args;
+            mirror.WorkingDirectory = mirrorDirectory;
+            mirror.Port = 8787;
+            // desktop-mirror is a WebSocket server, so the manager uses the listening port as its health check.
+            mirror.HealthPath = string.Empty;
+            mirror.BuiltIn = false;
+        }
+
         var worker = _settings.Workers.FirstOrDefault(item => item.Id.Equals("smtc-music", StringComparison.OrdinalIgnoreCase));
         if (worker is null) return;
         var serviceDirectory = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "smtc");
@@ -626,6 +784,33 @@ public sealed class AppController : IAsyncDisposable
         worker.HealthPath = "/health";
         worker.AutoStart = false;
         worker.BuiltIn = false;
+    }
+
+    private static string NormalizeMirrorFit(string? fit) => fit is "contain" or "cover" or "stretch" ? fit : "stretch";
+
+    private async Task SaveDesktopMirrorSettingsAsync(BridgeCommand command)
+    {
+        var source = GetString(command, "source") ?? "screen";
+        if (source is not ("screen" or "virtual-monitor" or "region")) throw new ArgumentException("无效的投屏来源");
+        var settings = _settings.DesktopMirror ??= new DesktopMirrorSettings();
+        settings.Source = source;
+        settings.Monitor = Math.Clamp(GetInt(command, "monitor", settings.Monitor), 1, 16);
+        settings.MonitorResolution = (GetString(command, "monitorResolution") ?? settings.MonitorResolution ?? "").Trim();
+        settings.Region = (GetString(command, "region") ?? settings.Region ?? "").Trim();
+        settings.Fit = NormalizeMirrorFit(GetString(command, "fit") ?? settings.Fit);
+        settings.Fps = Math.Clamp(GetInt(command, "fps", settings.Fps), 1, 30);
+        settings.Quality = Math.Clamp(GetInt(command, "quality", settings.Quality), 1, 95);
+        if (source == "virtual-monitor" && !System.Text.RegularExpressions.Regex.IsMatch(settings.MonitorResolution, @"^\d{2,5}x\d{2,5}$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            throw new ArgumentException("虚拟副屏分辨率格式应为 WIDTHxHEIGHT，例如 640x480");
+        if (source == "region" && !System.Text.RegularExpressions.Regex.IsMatch(settings.Region, @"^-?\d+,-?\d+,\d+,\d+$"))
+            throw new ArgumentException("区域格式应为 x,y,width,height");
+        await _store.SaveAsync(_settings);
+        ConfigureBundledWorkers();
+        _lastDesktopMirrorConfigKey = null;
+        await RequireServices().StopAsync("desktop-mirror");
+        await RequireServices().StartAsync("desktop-mirror");
+        await QueueEventAsync("desktopMirror.settings.saved", new { status = "success", settings });
+        await SendBootstrapAsync();
     }
 
     private static string? CurrentAppId(JsonElement state)
@@ -811,6 +996,10 @@ public sealed class AppController : IAsyncDisposable
         var requestedWeatherAddress = GetString(command, "weatherAddress")?.Trim();
         if (requestedLanguage is not null) _currentUiLanguage = requestedLanguage;
         await EnsureCompanionServiceStartedAsync(appId, true);
+        if (CompanionServiceForApp(appId) == "desktop-mirror")
+        {
+            await ConfigureDesktopMirrorAsync(ip, true);
+        }
         await QueueEventAsync("device.app.starting", new { id = appId });
         try { await RequireDeviceApi().WakeAsync(ip, _lifetime.Token); }
         catch (HttpRequestException) { }
@@ -1215,6 +1404,7 @@ public sealed class AppController : IAsyncDisposable
         {
             "fs" => new[] { "fs" },
             "devtools" => new[] { "devtools" },
+            "ram" => new[] { "ram" },
             _ => new[] { "fs", "devtools" },
         };
         var layouts = layout switch
@@ -1345,7 +1535,7 @@ public sealed class AppController : IAsyncDisposable
             try { await api.CreateDirectoryAsync(ip, baseDirectory, cancellationToken); } catch { }
         }
 
-        if (directions.Contains("download") && !directions.Contains("upload"))
+        if (directions.Contains("download") && !directions.Contains("upload") && transports.Any(item => item != "ram"))
         {
             foreach (var selectedLayout in layouts)
             {
@@ -1374,9 +1564,11 @@ public sealed class AppController : IAsyncDisposable
                             rounds,
                             message = $"{ip} {SpeedDirectionLabel(selectedDirection)} {SpeedTransportLabel(selectedTransport)} / {SpeedLayoutLabel(selectedLayout)} {round}/{rounds}",
                         });
-                        var result = selectedDirection == "upload"
-                            ? await UploadSpeedScenarioAsync(ip, selectedTransport, files, devtoolsChunkBytes, cancellationToken)
-                            : await DownloadSpeedScenarioAsync(ip, selectedTransport, files, devtoolsChunkBytes, cancellationToken);
+                        var result = selectedTransport == "ram"
+                            ? await RunRamSpeedScenarioAsync(ip, selectedDirection, files, devtoolsChunkBytes, cancellationToken)
+                            : selectedDirection == "upload"
+                                ? await UploadSpeedScenarioAsync(ip, selectedTransport, files, devtoolsChunkBytes, cancellationToken)
+                                : await DownloadSpeedScenarioAsync(ip, selectedTransport, files, devtoolsChunkBytes, cancellationToken);
                         await QueueEventAsync("device.speed.result", new
                         {
                             ip,
@@ -1412,6 +1604,23 @@ public sealed class AppController : IAsyncDisposable
         {
             await RequireDeviceApi().UploadLocalFileAsync(ip, item.DevicePath, item.LocalPath, cancellationToken);
         }
+    }
+
+    private async Task<(long Bytes, TimeSpan Elapsed)> RunRamSpeedScenarioAsync(
+        string ip,
+        string direction,
+        IReadOnlyList<SpeedTestFile> files,
+        int chunkBytes,
+        CancellationToken cancellationToken)
+    {
+        var totalBytes = files.Sum(item => (long)item.Size);
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var api = RequireDeviceApi();
+        var transferred = direction == "upload"
+            ? await api.UploadRamBenchmarkAsync(ip, checked((int)totalBytes), chunkBytes, cancellationToken)
+            : await api.DownloadRamBenchmarkAsync(ip, checked((int)totalBytes), chunkBytes, cancellationToken);
+        stopwatch.Stop();
+        return (transferred, stopwatch.Elapsed);
     }
 
     private async Task<(long Bytes, TimeSpan Elapsed)> UploadSpeedScenarioAsync(
@@ -1509,7 +1718,8 @@ public sealed class AppController : IAsyncDisposable
     }
 
     private static string SpeedTransportLabel(string transport) =>
-        transport.Equals("devtools", StringComparison.OrdinalIgnoreCase) ? "DevTools" : "FS";
+        transport.Equals("devtools", StringComparison.OrdinalIgnoreCase) ? "DevTools" :
+        transport.Equals("ram", StringComparison.OrdinalIgnoreCase) ? "RAM 内存" : "FS";
 
     private static string SpeedLayoutLabel(string layout) =>
         layout.Equals("fragments", StringComparison.OrdinalIgnoreCase) ? "碎片文件" : "连续文件";
@@ -1741,13 +1951,81 @@ public sealed class AppController : IAsyncDisposable
         var snapshot = RequireSerial().Connect(port, baudRate);
         _log.Info("串口", $"已连接 {port} @ {baudRate}");
         await QueueEventAsync("serial.status", snapshot);
+        await EnsureWifiGuideSerialReadyAsync();
     }
 
     private async Task DisconnectSerialAsync()
     {
+        _wifiSerialReadySignal?.TrySetCanceled();
+        _wifiSerialReadySignal = null;
+        _wifiSerialScanRequestId = null;
+        _wifiSerialProvisionRequestId = null;
         var snapshot = RequireSerial().Disconnect();
         _log.Info("串口", "串口已断开");
         await QueueEventAsync("serial.status", snapshot);
+    }
+
+    private async Task EnsureWifiGuideSerialReadyAsync()
+    {
+        await _wifiSerialHandshakeLock.WaitAsync(_lifetime.Token);
+        try
+        {
+            var serial = RequireSerial();
+            if (!serial.Snapshot().Connected)
+            {
+                throw new InvalidOperationException("请先连接设备串口。");
+            }
+
+            var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _wifiSerialReadySignal = ready;
+            var handshakeId = Guid.NewGuid().ToString("N");
+            await QueueEventAsync("wifi.serial.status", new
+            {
+                status = "waiting",
+                message = "串口已连接；若设备未响应，请操作设备打开 WiFi Setting Guide App",
+            });
+
+            var connection = serial.Snapshot();
+            var portName = connection.ConnectedPort;
+            var baudRate = connection.BaudRate;
+            for (var attempt = 1; attempt <= 20; attempt++)
+            {
+                try
+                {
+                    serial.SendLine("@CUBIC_WIFI/1 " + JsonSerializer.Serialize(new
+                    {
+                        cmd = "hello",
+                        id = handshakeId,
+                    }));
+                }
+                catch when (!string.IsNullOrWhiteSpace(portName))
+                {
+                    await Task.Delay(700, _lifetime.Token);
+                    try
+                    {
+                        serial.Connect(portName, baudRate);
+                    }
+                    catch
+                    {
+                        // The USB serial device may still be re-enumerating.
+                    }
+                }
+                var completed = await Task.WhenAny(
+                    ready.Task,
+                    Task.Delay(attempt == 1 ? 800 : 1000, _lifetime.Token));
+                if (completed == ready.Task && await ready.Task)
+                {
+                    return;
+                }
+            }
+
+            throw new TimeoutException("串口连接后设备未响应，请操作设备打开 WiFi Setting Guide App。");
+        }
+        finally
+        {
+            _wifiSerialReadySignal = null;
+            _wifiSerialHandshakeLock.Release();
+        }
     }
 
     private static string NormalizeDeviceDirectory(string? path)
@@ -1870,11 +2148,6 @@ public sealed class AppController : IAsyncDisposable
     }
 
     private Task SaveSettingsAsync() => _store.SaveAsync(_settings);
-
-    private void RequireProvisioning()
-    {
-        if (_provisioning is null) throw new InvalidOperationException("Windows WLAN 服务不可用，无法执行配网操作。");
-    }
 
     private ManagedServiceManager RequireServices() => _services ?? throw new InvalidOperationException("服务管理器尚未初始化。");
 

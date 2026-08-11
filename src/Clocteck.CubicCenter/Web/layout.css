@@ -264,3 +264,10 @@ select { overflow-y: auto; }
   .serial-info-grid { grid-template-columns: 1fr; }
   .settings-actions { grid-column: 1 / -1; }
 }
+.serial-provision-panel { margin-top: 15px; padding: 24px; }
+.serial-provision-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 20px 0 15px; }
+.serial-provision-grid label { display:flex; flex-direction:column; gap:7px; color:#7f8c84; font-size:10px; }
+.serial-provision-grid input, .serial-provision-grid select { height:36px; border:1px solid #303832; border-radius:8px; background:#0d110f; color:#dce5df; padding:0 10px; }
+.wifi-provision-wide { grid-column: 1 / -1; }
+.panel-description { color:#7f8c84; font-size:11px; margin:8px 0 0; }
+.serial-wired-note { display:block; margin-top:10px; color:#7f8c84; font-size:10px; line-height:1.5; }

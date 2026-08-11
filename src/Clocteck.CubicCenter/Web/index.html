@@ -28,6 +28,7 @@
           <button data-control-page="devtools"><span>开发工具</span></button>
           <button data-control-page="speed"><span>网速测试</span></button>
         </div>
+        <button class="nav-item" data-page="mirror"><i>▣</i><span>屏幕投屏</span></button>
         <button class="nav-item" data-page="serial"><i>⌁</i><span>串口工具</span></button>
         <button class="nav-item" data-page="logs"><i>≡</i><span>运行日志</span></button>
         <button class="nav-item" data-page="about"><i>i</i><span>关于</span></button>
@@ -70,13 +71,25 @@
             <input id="manualIpInput" type="text" inputmode="decimal" placeholder="例如 192.168.0.188" autocomplete="off">
             <button class="button primary" type="submit">连接设备</button>
           </form>
-          <div class="setup-layout">
+          <article class="panel serial-provision-panel">
+            <div class="panel-head"><div><span class="eyebrow">SERIAL WIFI SETUP</span><h2>串口配网</h2><p class="panel-description">不切换电脑 Wi‑Fi，通过设备串口扫描热点并发送密码。</p></div><span id="wifiSerialProvisionStatus" class="status-tag">未连接</span></div>
+            <div class="serial-provision-grid">
+              <label><span>串口</span><select id="wifiSerialPortSelect"><option value="">未发现串口</option></select></label>
+              <label><span>波特率</span><select id="wifiSerialBaudSelect"><option>115200</option><option>921600</option><option>460800</option></select></label>
+              <label class="wifi-provision-wide"><span>设备扫描到的 Wi‑Fi</span><select id="wifiSerialSsidSelect"><option value="">请先连接串口并扫描</option></select></label>
+              <label class="wifi-provision-wide"><span>Wi‑Fi 密码</span><input id="wifiSerialPassword" type="password" autocomplete="off" placeholder="开放网络可留空"></label>
+            </div>
+            <div class="button-row"><button id="wifiSerialScan" class="button ghost" type="button">扫描设备 Wi‑Fi</button><button id="wifiSerialProvision" class="button primary" type="button">通过串口配网</button></div>
+            <small class="serial-wired-note">设备需要通过 USB 数据线有线连接到 PC；点击“扫描设备 Wi‑Fi”时，软件会自动连接串口。</small>
+            <div id="wifiSerialHint" class="notice"><strong>请先在设备上打开 WiFi Setting Guide。</strong><span>串口配网页面会通过 USB 返回热点列表，密码不会写入 PC 日志。</span></div>
+          </article>
+          <div class="setup-layout legacy-wifi-provision hidden">
             <article class="panel setup-main">
               <div class="panel-head"><div><span class="eyebrow">首次连接向导</span><h2>连接 Clocteck Cubic</h2></div><span id="setupPercent" class="percent">0%</span></div>
               <div class="progress"><i id="setupProgress"></i></div>
               <div class="setup-status"><div id="setupIcon" class="setup-icon">01</div><div><h3 id="setupMessage">准备连接设备</h3><p id="setupHint">程序会保存当前 Wi-Fi，再连接设备热点并打开配网页面。</p></div></div>
               <div id="networkList" class="network-list empty"><p>点击扫描，查找附近的 <b>clocteck-cubic</b> 设备热点。</p></div>
-              <div class="button-row"><button id="scanButton" class="button primary" data-command="wifi.scan">扫描设备热点</button><button id="forceButton" class="button secondary hidden" data-command="provision.forceComplete">已完成配置</button><button id="cancelButton" class="button danger hidden" data-command="provision.cancel">取消并恢复网络</button></div>
+              <div class="button-row"><button id="scanButton" class="button primary" type="button">旧配网入口已停用</button></div>
               <div class="notice"><strong>配网期间电脑短暂断网属于正常现象。</strong><span>设备加入目标 Wi-Fi 后，软件会恢复电脑网络、按 IP 发现设备并进入内置控制界面。</span></div>
             </article>
             <aside class="panel steps-panel">
@@ -187,6 +200,24 @@
           </div>
         </section>
 
+        <section class="page" id="page-mirror">
+          <div class="section-heading"><div><span class="eyebrow">DESKTOP MIRROR</span><h2>屏幕投屏</h2><p>选择电脑画面来源，并通过 WebSocket 发送到设备的 320×240 屏幕。</p></div><span id="mirrorStatus" class="status-tag">未配置</span></div>
+          <form id="mirrorSettingsForm" class="panel mirror-settings-card">
+            <div class="mirror-settings-grid">
+              <label><span>投屏来源</span><select id="mirrorSource"><option value="screen">指定显示器</option><option value="virtual-monitor">虚拟副屏（按分辨率）</option><option value="region">指定窗口/区域</option></select></label>
+              <label><span>显示器编号</span><input id="mirrorMonitor" type="number" min="1" max="16" value="1"></label>
+              <label><span>虚拟副屏分辨率</span><input id="mirrorResolution" placeholder="640x480" value=""></label>
+              <label><span>窗口/区域坐标</span><input id="mirrorRegion" placeholder="x,y,width,height" value=""></label>
+              <label><span>画面适配</span><select id="mirrorFit"><option value="stretch">拉伸填充</option><option value="contain">等比留黑边</option><option value="cover">等比裁切</option></select></label>
+              <label><span>目标帧率</span><input id="mirrorFps" type="number" min="1" max="30" value="8"></label>
+              <label><span>JPEG 质量</span><input id="mirrorQuality" type="number" min="1" max="95" value="65"></label>
+            </div>
+            <div class="mirror-note"><b>虚拟副屏模式</b><span>需要先在 Windows 安装兼容的 Indirect Display Driver；PCAPP 会按分辨率自动选择该显示器，不会自动安装驱动。</span></div>
+            <div class="button-row"><button class="button primary" type="submit">保存并重启投屏服务</button><button class="button secondary" id="mirrorRefresh" type="button">刷新服务状态</button><button class="button ghost" id="mirrorStart" type="button">启动投屏服务</button><button class="button danger" id="mirrorStop" type="button">停止投屏服务</button></div>
+          </form>
+          <article class="panel mirror-help-card"><span class="eyebrow">WORKFLOW</span><h3>使用建议</h3><p>“指定显示器”适合完整扩展屏；“虚拟副屏”适合把目标窗口放到虚拟显示器；“指定窗口/区域”适合只采集一个 320×240 内容窗口。</p><code id="mirrorCommandPreview">desktop_mirror_server.py --source screen --monitor 1</code></article>
+        </section>
+
         <section class="page" id="page-serial">
           <div class="section-heading"><div><h2>串口工具</h2><p>连接设备串口并实时读取输出信息</p></div><span id="serialToolStatusBadge" class="status-tag">串口未连接</span></div>
           <div class="serial-info-grid">
@@ -261,7 +292,7 @@
               </div>
               <div id="speedDeviceList" class="speed-device-list"><div class="speed-empty compact">等待设备列表。</div></div>
               <label><span>测试方向</span><select id="speedDirection"><option value="both">电脑传设备 + 设备传电脑</option><option value="upload">仅电脑传设备</option><option value="download">仅设备传电脑</option></select></label>
-              <label><span>测试接口</span><select id="speedTransport"><option value="both">FS + DevTools</option><option value="fs">仅 FS</option><option value="devtools">仅 DevTools</option></select></label>
+              <label><span>测试接口</span><select id="speedTransport"><option value="both">FS + DevTools</option><option value="fs">仅 FS</option><option value="devtools">仅 DevTools</option><option value="ram">RAM 内存（不写 SD）</option></select></label>
               <label><span>测试类型</span><select id="speedLayout"><option value="both">连续文件 + 碎片文件</option><option value="continuous">仅连续文件</option><option value="fragments">仅碎片文件</option></select></label>
               <div class="speed-two-columns">
                 <label><span>测试轮数</span><input id="speedRounds" type="number" min="1" max="20" value="2"></label>
@@ -292,6 +323,8 @@
                 <div><span>FS 设备传电脑</span><b id="speedFsDownloadAverage">-- KB/S</b></div>
                 <div><span>DevTools 电脑传设备</span><b id="speedDevtoolsUploadAverage">-- KB/S</b></div>
                 <div><span>DevTools 设备传电脑</span><b id="speedDevtoolsDownloadAverage">-- KB/S</b></div>
+                <div><span>RAM 内存 电脑传设备</span><b id="speedRamUploadAverage">-- KB/S</b></div>
+                <div><span>RAM 内存 设备传电脑</span><b id="speedRamDownloadAverage">-- KB/S</b></div>
                 <div><span>API 平均延迟</span><b id="speedLatencyAverage">-- ms</b></div>
                 <div><span>最近结果</span><b id="speedLastResult">--</b></div>
               </div>

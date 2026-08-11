@@ -10,9 +10,11 @@ public sealed class SerialMonitorService : IDisposable
     private string? _lastError;
     private long _receivedBytes;
     private DateTimeOffset? _connectedAt;
+    private string _lineBuffer = string.Empty;
 
     public event EventHandler<SerialMonitorSnapshot>? StatusChanged;
     public event EventHandler<SerialTextChunk>? TextReceived;
+    public event EventHandler<SerialProtocolMessage>? ProtocolReceived;
 
     public SerialMonitorSnapshot Snapshot()
     {
@@ -68,6 +70,7 @@ public sealed class SerialMonitorService : IDisposable
                 _lastError = null;
                 _receivedBytes = 0;
                 _connectedAt = DateTimeOffset.Now;
+                _lineBuffer = string.Empty;
             }
             catch
             {
@@ -91,6 +94,16 @@ public sealed class SerialMonitorService : IDisposable
         return PublishStatus();
     }
 
+    public void SendLine(string line)
+    {
+        line ??= string.Empty;
+        lock (_sync)
+        {
+            if (_port is null || !_port.IsOpen) throw new InvalidOperationException("串口尚未连接。");
+            _port.Write(line.EndsWith("\n", StringComparison.Ordinal) ? line : line + "\n");
+        }
+    }
+
     private void OnDataReceived(object sender, SerialDataReceivedEventArgs args)
     {
         string text;
@@ -112,7 +125,32 @@ public sealed class SerialMonitorService : IDisposable
                 return;
             }
         }
-        if (!string.IsNullOrEmpty(text)) TextReceived?.Invoke(this, new SerialTextChunk(DateTimeOffset.Now, text, receivedBytes));
+        if (!string.IsNullOrEmpty(text))
+        {
+            TextReceived?.Invoke(this, new SerialTextChunk(DateTimeOffset.Now, text, receivedBytes));
+            ParseProtocolLines(text);
+        }
+    }
+
+    private void ParseProtocolLines(string text)
+    {
+        List<string> lines;
+        lock (_sync)
+        {
+            _lineBuffer += text;
+            lines = _lineBuffer.Split('\n').ToList();
+            _lineBuffer = lines[^1];
+            lines.RemoveAt(lines.Count - 1);
+        }
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimEnd('\r');
+            const string prefix = "@CUBIC_WIFI/1 ";
+            if (trimmed.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                ProtocolReceived?.Invoke(this, new SerialProtocolMessage(DateTimeOffset.Now, trimmed[prefix.Length..]));
+            }
+        }
     }
 
     private void OnErrorReceived(object sender, SerialErrorReceivedEventArgs args)
@@ -137,6 +175,7 @@ public sealed class SerialMonitorService : IDisposable
         _port.Dispose();
         _port = null;
         _connectedAt = null;
+        _lineBuffer = string.Empty;
     }
 
     private static string[] GetPorts() => SerialPort.GetPortNames()
@@ -159,3 +198,4 @@ public sealed record SerialMonitorSnapshot(
     DateTimeOffset? ConnectedAt);
 
 public sealed record SerialTextChunk(DateTimeOffset Time, string Text, long ReceivedBytes);
+public sealed record SerialProtocolMessage(DateTimeOffset Time, string Json);

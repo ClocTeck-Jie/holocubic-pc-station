@@ -2,7 +2,7 @@
   const I18n = window.CubicI18n;
   const state = {
     services: [], devices: [], selectedDeviceIp: '', control: null, syncedLanguageKey: '',
-    catalog: [], catalogDeviceIp: '', catalogLoading: false, currentStoreFilter: 'all', storePendingInstalls: new Map(), pcStoreProgress: new Map(), pcStoreCached: new Map(), storePollTimer: null, firmwarePollTimer: null, provision: null, logs: [], currentPage: 'home', currentControlTab: 'apps',
+    catalog: [], catalogDeviceIp: '', catalogLoading: false, currentStoreFilter: 'all', storePendingInstalls: new Map(), pcStoreProgress: new Map(), pcStoreCached: new Map(), storePollTimer: null, firmwarePollTimer: null, wifiNetworks: [], logs: [], currentPage: 'home', currentControlTab: 'apps',
     serial: null, serialText: '', currentLogView: 'app', currentDeveloperTab: 'lua', mediaKind: 'image',
     fs: { deviceIp:'', path:'/sd/images', items:[], selected:null, previewText:'' }, fsClipboard:null, loadedLuaCode: '', forceAppFrameReload: false,
     speedResults: [], speedRunning: false, speedSelectedIps: new Set()
@@ -12,6 +12,7 @@
     setup: ['添加设备', '连接设备热点并完成首次配网'],
     store: ['应用商店', '从服务器读取应用信息并选择设备或 PC 下载'],
     control: ['设备控制', '软件内置界面通过设备 API 传输数据'],
+    mirror: ['屏幕投屏', '配置电脑画面来源并发送到设备'],
     files: ['文件管理', '管理设备图片、GIF、音乐、歌词和应用文件'],
     serial: ['串口工具', '连接设备串口并实时读取输出信息'],
     devtools: ['设备开发工具', '编辑并运行 DevRun Lua 代码'],
@@ -48,15 +49,15 @@
       if (!state.catalog.length && !state.catalogLoading) { state.catalogLoading = true; post('device.store.load'); }
     }
     if (name === 'files' && state.selectedDeviceIp && state.fs.deviceIp !== state.selectedDeviceIp) post('device.fs.list', { path:state.fs.path || '/sd/images' });
-    if (name === 'serial') post('serial.refresh');
+    if (name === 'serial' || name === 'setup') post('serial.refresh');
   }
 
   function receive(message) {
     const { type, payload } = message || {};
     if (type === 'app.bootstrap') renderBootstrap(payload || {});
     else if (type === 'system.status') { renderWifi(payload?.wifi); renderStats(payload?.stats); }
-    else if (type === 'wifi.networks') renderNetworks(payload || []);
-    else if (type === 'provision.status') renderProvision(payload);
+    else if (type === 'wifi.networks') renderWifiSerialNetworks(payload || []);
+    else if (type === 'wifi.serial.status') renderWifiSerialStatus(payload || {});
     else if (type === 'services.state') renderServices(payload || []);
     else if (type === 'device.list') renderDeviceList(payload || {});
     else if (type === 'device.found') updateFoundDevice(payload);
@@ -80,6 +81,7 @@
     else if (type === 'holoMonitor.config') renderMonitorConfig(payload);
     else if (type === 'holopet.config') renderHolopetConfig(payload);
     else if (type === 'smtcMusic.config') renderSmtcMusicConfig(payload);
+    else if (type === 'desktopMirror.settings.saved') { renderMirrorSettings(payload?.settings || {}); toast('投屏设置已保存，服务已重启'); }
     else if (type === 'log.entry') appendLog(payload);
     else if (type === 'serial.status') renderSerialStatus(payload || {});
     else if (type === 'serial.data') appendSerialText(payload || {});
@@ -105,12 +107,22 @@
     renderWifi(data.wifi);
     renderStats(data.stats);
     renderServices(data.services || []);
-    renderProvision(data.provision);
     state.logs = data.logs || [];
     renderLogs();
     renderDeviceList({ devices: data.devices || [], selectedDeviceIp: data.selectedDeviceIp || '' });
     renderSerialStatus(data.serial || {});
+    renderMirrorSettings(data.desktopMirror || {});
     q('#headerLanguageSelect').value = I18n.language;
+  }
+
+  function renderMirrorSettings(settings) {
+    const source = settings?.source || 'screen';
+    const set = (id, value) => { const node = q(id); if (node && value !== undefined && value !== null) node.value = String(value); };
+    set('#mirrorSource', source); set('#mirrorMonitor', settings?.monitor || 1);
+    set('#mirrorResolution', settings?.monitorResolution || ''); set('#mirrorRegion', settings?.region || '');
+    set('#mirrorFit', settings?.fit || 'stretch'); set('#mirrorFps', settings?.fps || 8); set('#mirrorQuality', settings?.quality || 65);
+    const status = q('#mirrorStatus'); if (status) status.textContent = source === 'virtual-monitor' ? '虚拟副屏' : source === 'region' ? '窗口/区域' : '指定显示器';
+    const preview = q('#mirrorCommandPreview'); if (preview) preview.textContent = `desktop_mirror_server.py --source ${source} --monitor ${settings?.monitor || 1}`;
   }
 
   function renderWifi(wifi) {
@@ -225,7 +237,7 @@
       const strength = Math.max(1, Math.min(4, Math.ceil(Number(network.signalQuality || 0) / 25)));
       return `<div class="network-entry"><div><h4>${escapeHtml(network.ssid)}</h4><span>${network.securityEnabled ? '需要密码或已有配置' : '设备开放热点'} · 信号 ${network.signalQuality}%</span></div><div class="signal s${strength}"><i></i><i></i><i></i><i></i></div><button class="button primary connect-ap" data-ssid="${escapeHtml(network.ssid)}">连接</button></div>`;
     }).join('');
-    qa('.connect-ap').forEach(button => button.addEventListener('click', () => post('provision.start', { ssid: button.dataset.ssid })));
+    qa('.connect-ap').forEach(button => button.addEventListener('click', () => toast('请使用串口配网', true)));
     I18n.localize(box);
   }
 
@@ -803,6 +815,49 @@
     I18n.localize(host);
   }
 
+  // Overview service cards: show every service and allow manual start/stop.
+  function renderServices(services) {
+    state.services = Array.isArray(services) ? services : [];
+    const language = I18n.language;
+    const localized = (zh, en, ja, hant) => language === 'en' ? en : language === 'ja' ? ja : language === 'zh-Hant' ? hant : zh;
+    const labels = {
+      running: localized('\u8fd0\u884c\u4e2d', 'Running', '\u5b9f\u884c\u4e2d', '\u57f7\u884c\u4e2d'),
+      external: localized('\u5916\u90e8\u8fd0\u884c', 'External', '\u5916\u90e8\u5b9f\u884c', '\u5916\u90e8\u57f7\u884c'),
+      stopped: localized('\u5df2\u505c\u6b62', 'Stopped', '\u505c\u6b62', '\u5df2\u505c\u6b62'),
+      error: localized('\u9519\u8bef', 'Error', '\u30a8\u30e9\u30fc', '\u932f\u8aa4'),
+      unconfigured: localized('\u672a\u914d\u7f6e', 'Not configured', '\u672a\u8a2d\u5b9a', '\u672a\u8a2d\u5b9a'),
+      start: localized('\u542f\u52a8', 'Start', '\u958b\u59cb', '\u555f\u52d5'),
+      stop: localized('\u505c\u6b62\u670d\u52a1', 'Stop service', '\u30b5\u30fc\u30d3\u30b9\u3092\u505c\u6b62', '\u505c\u6b62\u670d\u52d9'),
+      port: localized('\u76d1\u542c\u7aef\u53e3', 'Listening port', '\u30dd\u30fc\u30c8', '\u76e3\u807d\u9023\u5165\u57e0'),
+      heading: localized('\u7535\u8111\u670d\u52a1', 'PC services', '\u30d4\u30fc\u30b7\u30fc\u30b5\u30fc\u30d3\u30b9', '\u96fb\u8166\u670d\u52d9'),
+      hint: localized('\u53ef\u624b\u52a8\u542f\u7528\u6216\u505c\u6b62\uff0c\u8bbe\u5907\u5e94\u7528\u4e5f\u4f1a\u81ea\u52a8\u542f\u7528\u6240\u9700\u670d\u52a1', 'Start or stop services manually; device apps also start required services automatically.', '\u30b5\u30fc\u30d3\u30b9\u3092\u624b\u52d5\u3067\u8d77\u52d5\u30fb\u505c\u6b62\u3067\u304d\u3001\u5bfe\u5fdc\u30a2\u30d7\u30ea\u306f\u5fc5\u8981\u306a\u30b5\u30fc\u30d3\u30b9\u3092\u81ea\u52d5\u8d77\u52d5\u3057\u307e\u3059', '\u53ef\u624b\u52d5\u555f\u7528\u6216\u505c\u6b62\uff0c\u88dd\u7f6e\u61c9\u7528\u7a0b\u5f0f\u4e5f\u6703\u81ea\u52d5\u555f\u7528\u6240\u9700\u670d\u52d9'),
+      refresh: localized('\u5237\u65b0\u72b6\u6001', 'Refresh status', '\u72b6\u614b\u3092\u66f4\u65b0', '\u91cd\u65b0\u6574\u7406\u72c0\u614b')
+    };
+    const host = q('#serviceSummary');
+    if (!host) return;
+    const heading = host.previousElementSibling;
+    if (heading) {
+      const title = heading.querySelector('h3');
+      const hint = heading.querySelector('p');
+      const refresh = heading.querySelector('button');
+      if (title) title.textContent = labels.heading;
+      if (hint) hint.textContent = labels.hint;
+      if (refresh) refresh.textContent = labels.refresh;
+    }
+    host.innerHTML = state.services.length ? state.services.map(service => {
+      const active = service.status === 'running' || service.status === 'external';
+      const external = service.status === 'external';
+      const action = active ? 'stop' : 'start';
+      const buttonLabel = active ? labels.stop : labels.start;
+      const disabled = external ? 'disabled title="External process"' : '';
+      const status = labels[service.status] || service.status || labels.stopped;
+      return `<article class="summary-card running-service-card service-overview-card ${active ? 'is-active' : 'is-stopped'}"><div class="running-service-main"><div class="service-icon">${escapeHtml((service.name || service.id || '--').slice(0,2))}</div><div><div class="row"><h4>${escapeHtml(service.name || service.id || '--')}</h4><span class="status-tag ${active ? 'running' : service.status === 'error' ? 'error' : ''}">${escapeHtml(status)}</span></div><p>${escapeHtml(service.description || '')}</p><small>${labels.port} ${service.port || '--'} · ${escapeHtml(service.message || '')}</small></div></div><button class="button ${active ? 'danger' : 'primary'} overview-service-action" data-action="${action}" data-id="${escapeHtml(service.id || '')}" ${disabled}>${escapeHtml(buttonLabel)}</button></article>`;
+    }).join('') : `<div class="panel empty-state service-empty">${escapeHtml(localized('\u6682\u65e0\u7535\u8111\u670d\u52a1', 'No PC services', '\u5b9f\u884c\u4e2d\u306e PC \u30b5\u30fc\u30d3\u30b9\u306f\u3042\u308a\u307e\u305b\u3093', '\u76ee\u524d\u6c92\u6709\u96fb\u8166\u670d\u52d9'))}</div>`;
+    qa('#serviceSummary .overview-service-action').forEach(button => button.addEventListener('click', () => {
+      post(button.dataset.action === 'stop' ? 'services.stop' : 'services.start', { id: button.dataset.id });
+    }));
+  }
+
   function appendLog(entry) { if (!entry) return; state.logs.push(entry); if (state.logs.length > 600) state.logs.splice(0,100); renderLogs(); }
   function renderLogs() {
     const box = q('#logList');
@@ -842,6 +897,53 @@
       : I18n.t(connected ? '已连接' : '串口未连接');
     q('#serialToolStatusBadge').className = `status-tag ${connected ? 'running' : snapshot?.error ? 'error' : ''}`;
     I18n.localize(select);
+    const wifiSelect = q('#wifiSerialPortSelect');
+    if (wifiSelect) {
+      const wifiPreferred = snapshot?.connectedPort || wifiSelect.value || ports[0] || '';
+      wifiSelect.innerHTML = ports.length
+        ? ports.map(port => `<option value="${escapeHtml(port)}">${escapeHtml(port)}</option>`).join('')
+        : '<option value="">未发现串口</option>';
+      wifiSelect.value = ports.includes(wifiPreferred) ? wifiPreferred : (ports[0] || '');
+      wifiSelect.disabled = connected;
+      const wifiBaud = q('#wifiSerialBaudSelect');
+      if (wifiBaud && snapshot?.baudRate) wifiBaud.value = String(snapshot.baudRate);
+    }
+  }
+
+  function renderWifiSerialNetworks(networks) {
+    const currentSsid = Array.isArray(networks) ? '' : String(networks?.currentSsid || '');
+    state.wifiNetworks = Array.isArray(networks) ? networks : (Array.isArray(networks?.networks) ? networks.networks : []);
+    const select = q('#wifiSerialSsidSelect');
+    if (!select) return;
+    const sorted = [...state.wifiNetworks].sort((a, b) => Number(b.rssi || -127) - Number(a.rssi || -127));
+    select.innerHTML = sorted.length
+      ? sorted.map(item => `<option value="${escapeHtml(item.ssid || '')}">${escapeHtml(item.ssid || '--')} · ${Number(item.rssi || -127)} dBm</option>`).join('')
+      : '<option value="">未发现设备 Wi‑Fi</option>';
+    const current = sorted.find(item => String(item.ssid || '') === currentSsid);
+    const nonDeviceAp = sorted.find(item => !String(item.ssid || '').toLowerCase().startsWith('clocteck-cubic'));
+    if (current?.ssid) select.value = current.ssid;
+    else if (nonDeviceAp?.ssid) select.value = nonDeviceAp.ssid;
+    else if (sorted[0]?.ssid) select.value = sorted[0].ssid;
+    const hint = q('#wifiSerialHint');
+    if (hint) hint.innerHTML = `<strong>已收到 ${sorted.length} 个设备热点。</strong><span>默认选择信号最强的 Wi‑Fi；密码不会写入 PC 日志。</span>`;
+  }
+
+  function renderWifiSerialStatus(payload) {
+    const status = payload?.status || 'idle';
+    const reason = Number(payload?.reason);
+    const passwordError = [15, 23, 202, 204].includes(reason) || String(payload?.message || '').toLowerCase() === 'wifi password incorrect';
+    const displayMessage = passwordError ? 'WiFi 密码错误' : payload?.message;
+    const node = q('#wifiSerialProvisionStatus');
+    const hint = q('#wifiSerialHint');
+    if (node) {
+      node.textContent = status === 'success' ? '配网成功' : status === 'connecting' ? '连接中' : status === 'error' ? (passwordError ? '密码错误' : '失败') : status === 'scan_result' ? '扫描完成' : status === 'ready' ? '设备就绪' : status;
+      node.className = `status-tag ${status === 'success' || status === 'ready' ? 'running' : status === 'error' ? 'error' : ''}`;
+    }
+    if (hint && displayMessage) hint.innerHTML = `<strong>${escapeHtml(displayMessage)}</strong><span>${payload.ip ? `设备 IP：${escapeHtml(payload.ip)}` : '请操作设备打开 WiFi Setting Guide App。'}</span>`;
+    if (status === 'success' && payload.ip) {
+      post('device.connectIp', { ip: payload.ip });
+      toast(`设备配网成功：${payload.ip}`);
+    }
   }
 
   function appendSerialText(chunk) {
@@ -1096,6 +1198,8 @@
     setAverage('#speedFsDownloadAverage', by('fs', 'download'));
     setAverage('#speedDevtoolsUploadAverage', by('devtools', 'upload'));
     setAverage('#speedDevtoolsDownloadAverage', by('devtools', 'download'));
+    setAverage('#speedRamUploadAverage', by('ram', 'upload'));
+    setAverage('#speedRamDownloadAverage', by('ram', 'download'));
     const latencyRows = state.speedResults.filter(item => item.category === 'latency' && !item.error && Number.isFinite(item.avgMs) && item.avgMs > 0);
     q('#speedLatencyAverage').textContent = latencyRows.length ? `${(latencyRows.reduce((sum, item) => sum + item.avgMs, 0) / latencyRows.length).toFixed(1)} ms` : '-- ms';
     const latest = state.speedResults[0];
@@ -1131,7 +1235,7 @@
     const ips = [...new Set(state.speedResults.map(item => item.ip).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric:true }));
     const rows = ips.map(ip => buildSpeedDeviceSummary(ip));
     host.innerHTML = `<table class="speed-visual-table">
-      <thead><tr><th>设备</th><th>RSSI</th><th>网络质量</th><th>API 延迟</th><th>FS 电脑传设备</th><th>FS 设备传电脑</th><th>DevTools 电脑传设备</th><th>DevTools 设备传电脑</th><th>最近错误</th></tr></thead>
+      <thead><tr><th>设备</th><th>RSSI</th><th>网络质量</th><th>API 延迟</th><th>FS 电脑传设备</th><th>FS 设备传电脑</th><th>DevTools 电脑传设备</th><th>DevTools 设备传电脑</th><th>RAM 电脑传设备</th><th>RAM 设备传电脑</th><th>最近错误</th></tr></thead>
       <tbody>${rows.map(summary => `
         <tr class="quality-${summary.quality.level}">
           <td><b>${escapeHtml(summary.ip)}</b><small>${summary.resultCount} 条结果 · ${escapeHtml(summary.deviceName)}</small></td>
@@ -1142,6 +1246,8 @@
           <td>${renderTransferSummaryCell(summary.fsDownload)}</td>
           <td>${renderTransferSummaryCell(summary.devtoolsUpload)}</td>
           <td>${renderTransferSummaryCell(summary.devtoolsDownload)}</td>
+          <td>${renderTransferSummaryCell(summary.ramUpload)}</td>
+          <td>${renderTransferSummaryCell(summary.ramDownload)}</td>
           <td>${summary.lastError ? `<span class="speed-error-text">${escapeHtml(summary.lastError)}</span>` : '<span class="speed-muted">无</span>'}</td>
         </tr>`).join('')}</tbody>
     </table>`;
@@ -1164,6 +1270,8 @@
       fsDownload: summarizeTransfer(rows, 'fs', 'download'),
       devtoolsUpload: summarizeTransfer(rows, 'devtools', 'upload'),
       devtoolsDownload: summarizeTransfer(rows, 'devtools', 'download'),
+      ramUpload: summarizeTransfer(rows, 'ram', 'upload'),
+      ramDownload: summarizeTransfer(rows, 'ram', 'download'),
       lastError,
     };
     summary.quality = rateSpeedDevice(summary);
@@ -1304,6 +1412,17 @@
     updateLuaMeta();
   });
   q('#loadStore').addEventListener('click', () => post('device.store.load'));
+  q('#mirrorSettingsForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    post('desktopMirror.settings.save', {
+      source:q('#mirrorSource').value, monitor:Number(q('#mirrorMonitor').value || 1),
+      monitorResolution:q('#mirrorResolution').value.trim(), region:q('#mirrorRegion').value.trim(),
+      fit:q('#mirrorFit').value, fps:Number(q('#mirrorFps').value || 8), quality:Number(q('#mirrorQuality').value || 65)
+    });
+  });
+  q('#mirrorRefresh')?.addEventListener('click', () => post('services.refresh'));
+  q('#mirrorStart')?.addEventListener('click', () => post('services.start', { id:'desktop-mirror' }));
+  q('#mirrorStop')?.addEventListener('click', () => post('services.stop', { id:'desktop-mirror' }));
   q('#storeInstallMode').addEventListener('change', event => {
     q('#storeTransferModeField').classList.toggle('hidden', event.target.value !== 'pc');
     renderStoreGrid();
@@ -1411,6 +1530,16 @@
   q('#clearSerial').addEventListener('click', () => {
     state.serialText = '';
     q('#serialOutput').innerHTML = `<span>${I18n.t('等待串口输出…')}</span>`;
+  });
+  q('#wifiSerialScan')?.addEventListener('click', () => post('wifi.serial.scan', {
+    port:q('#wifiSerialPortSelect')?.value || '',
+    baud:Number(q('#wifiSerialBaudSelect')?.value || 115200)
+  }));
+  q('#wifiSerialProvision')?.addEventListener('click', () => {
+    const ssid = q('#wifiSerialSsidSelect')?.value || '';
+    const pwd = q('#wifiSerialPassword')?.value || '';
+    if (!ssid) return toast('请先扫描并选择设备 Wi‑Fi', true);
+    post('wifi.serial.provision', { ssid, pwd });
   });
   qa('[data-media-path]').forEach(button => button.addEventListener('click', () => {
     qa('[data-media-path]').forEach(item => item.classList.toggle('active', item === button));

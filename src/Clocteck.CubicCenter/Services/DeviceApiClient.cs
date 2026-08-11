@@ -231,6 +231,96 @@ public sealed class DeviceApiClient : IDisposable
         }
     }
 
+    public async Task<long> UploadRamBenchmarkAsync(
+        string ip,
+        int totalBytes,
+        int chunkSize,
+        CancellationToken cancellationToken)
+    {
+        totalBytes = Math.Clamp(totalBytes, 1, 64 * 1024 * 1024);
+        chunkSize = Math.Clamp(chunkSize, 1024, 256 * 1024);
+        var buffer = new byte[chunkSize];
+        long completed = 0;
+        while (completed < totalBytes)
+        {
+            var count = (int)Math.Min(chunkSize, totalBytes - completed);
+            using var body = new ByteArrayContent(buffer, 0, count);
+            body.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            var path = "/devtools/api/bench/upload?size=" + count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            await SendUploadJsonAsync(ip, HttpMethod.Post, path, body, cancellationToken);
+            completed += count;
+        }
+        return completed;
+    }
+
+    public async Task<long> DownloadRamBenchmarkAsync(
+        string ip,
+        int totalBytes,
+        int chunkSize,
+        CancellationToken cancellationToken)
+    {
+        totalBytes = Math.Clamp(totalBytes, 1, 64 * 1024 * 1024);
+        chunkSize = Math.Clamp(chunkSize, 1024, 256 * 1024);
+        long completed = 0;
+        while (completed < totalBytes)
+        {
+            var count = (int)Math.Min(chunkSize, totalBytes - completed);
+            var path = "/devtools/api/bench/download?size=" + count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            using var response = await _client.GetAsync(BuildUri(ip, path), HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var text = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new HttpRequestException($"HTTP {(int)response.StatusCode}：{TryReadError(text) ?? response.ReasonPhrase ?? "RAM benchmark download failed"}", null, response.StatusCode);
+            }
+            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+            var chunkRead = 0;
+            try
+            {
+                while (chunkRead < count)
+                {
+                    var read = await input.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, count - chunkRead)), cancellationToken);
+                    if (read <= 0) break;
+                    chunkRead += read;
+                }
+            }
+            finally { ArrayPool<byte>.Shared.Return(buffer); }
+            if (chunkRead != count)
+            {
+                throw new InvalidOperationException($"RAM benchmark download size mismatch: expected {count}, received {chunkRead}");
+            }
+            completed += chunkRead;
+        }
+        return completed;
+    }
+
+    public async Task<long> EchoRamBenchmarkAsync(
+        string ip,
+        int totalBytes,
+        int chunkSize,
+        CancellationToken cancellationToken)
+    {
+        totalBytes = Math.Clamp(totalBytes, 1, 64 * 1024 * 1024);
+        chunkSize = Math.Clamp(chunkSize, 1024, 256 * 1024);
+        var buffer = new byte[chunkSize];
+        long completed = 0;
+        while (completed < totalBytes)
+        {
+            var count = (int)Math.Min(chunkSize, totalBytes - completed);
+            using var body = new ByteArrayContent(buffer, 0, count);
+            body.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            var path = "/devtools/api/bench/echo";
+            using var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(ip, path)) { Content = body };
+            request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoStore = true };
+            using var response = await _uploadClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode) throw new HttpRequestException($"HTTP {(int)response.StatusCode}：RAM benchmark echo failed", null, response.StatusCode);
+            var echoed = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+            if (echoed.Length != count) throw new InvalidOperationException("RAM benchmark echo size mismatch");
+            completed += count;
+        }
+        return completed;
+    }
+
     public Task<JsonElement> DeleteFileAsync(string ip, string path, CancellationToken cancellationToken) =>
         SendJsonAsync(ip, HttpMethod.Delete,
             "/api/system/fs/remove?path=" + Uri.EscapeDataString(NormalizeFsPath(path)), null, cancellationToken);

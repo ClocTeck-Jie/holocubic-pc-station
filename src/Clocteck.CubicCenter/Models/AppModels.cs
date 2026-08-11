@@ -11,6 +11,18 @@ public sealed class AppSettings
     public List<SavedDevice> Devices { get; set; } = [];
     public bool CloseToTray { get; set; } = true;
     public List<WorkerSettings> Workers { get; set; } = WorkerSettings.CreateDefaults();
+    public DesktopMirrorSettings DesktopMirror { get; set; } = new();
+}
+
+public sealed class DesktopMirrorSettings
+{
+    public string Source { get; set; } = "screen";
+    public int Monitor { get; set; } = 1;
+    public string MonitorResolution { get; set; } = "";
+    public string Region { get; set; } = "";
+    public string Fit { get; set; } = "stretch";
+    public int Fps { get; set; } = 8;
+    public int Quality { get; set; } = 65;
 }
 
 public sealed class SavedDevice
