@@ -30,7 +30,7 @@ public sealed class GitHubStoreInstaller : IDisposable
         _log = log;
         _cacheRoot = Path.Combine(AppContext.BaseDirectory, "data", "store-cache");
         Directory.CreateDirectory(_cacheRoot);
-        _client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ClocteckCubicCenter", "0.1.0"));
+        _client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ClocteckCubicCenter", "0.1.1"));
     }
 
     public IReadOnlyList<CachedStorePackage> GetCachedPackages()

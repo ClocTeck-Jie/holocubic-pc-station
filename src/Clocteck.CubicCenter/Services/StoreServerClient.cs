@@ -27,7 +27,7 @@ public sealed class StoreServerClient : IDisposable
     public StoreServerClient(AppLog log)
     {
         _log = log;
-        _client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ClocteckCubicCenter", "0.1.0"));
+        _client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ClocteckCubicCenter", "0.1.1"));
         _client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
 

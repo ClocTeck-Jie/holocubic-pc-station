@@ -25,7 +25,7 @@ public partial class MainWindow : Window
         _initialized = true;
         try
         {
-            var webRoot = Path.Combine(AppContext.BaseDirectory, "Web");
+            var webRoot = Path.Combine(AppContext.BaseDirectory, "resources", "Web");
             var userData = Path.Combine(AppContext.BaseDirectory, "data", "webview2");
             Directory.CreateDirectory(userData);
             var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userData);

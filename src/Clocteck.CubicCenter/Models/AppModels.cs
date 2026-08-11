@@ -4,7 +4,6 @@ namespace Clocteck.CubicCenter.Models;
 
 public sealed class AppSettings
 {
-    public string DeviceHostname { get; set; } = "clocteck-cubic.local";
     public List<string> DeviceApAliases { get; set; } = ["clocteck-cubic", "clocteck_cubic"];
     public string? LastDeviceIp { get; set; }
     public string? SelectedDeviceIp { get; set; }

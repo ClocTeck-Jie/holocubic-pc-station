@@ -2,7 +2,7 @@
   const I18n = window.CubicI18n;
   const state = {
     services: [], devices: [], selectedDeviceIp: '', control: null, syncedLanguageKey: '',
-    catalog: [], catalogDeviceIp: '', catalogLoading: false, currentStoreFilter: 'all', storePendingInstalls: new Map(), pcStoreProgress: new Map(), pcStoreCached: new Map(), storePollTimer: null, firmwarePollTimer: null, wifiNetworks: [], logs: [], currentPage: 'home', currentControlTab: 'apps',
+    catalog: [], catalogDeviceIp: '', catalogLoading: false, storeRefreshQueued: false, currentStoreFilter: 'all', storePendingInstalls: new Map(), pcStoreProgress: new Map(), pcStoreCached: new Map(), storePollTimer: null, firmwarePollTimer: null, wifiNetworks: [], logs: [], currentPage: 'home', currentControlTab: 'apps',
     serial: null, serialText: '', currentLogView: 'app', currentDeveloperTab: 'lua', mediaKind: 'image',
     fs: { deviceIp:'', path:'/sd/images', items:[], selected:null, previewText:'' }, fsClipboard:null, loadedLuaCode: '', forceAppFrameReload: false,
     speedResults: [], speedRunning: false, speedSelectedIps: new Set()
@@ -28,6 +28,21 @@
   const formatBytes = value => value ? `${(Number(value) / 1024 / 1024 / 1024).toFixed(1)} GB` : '--';
   const selectedDevice = () => state.devices.find(device => device.ipAddress === state.selectedDeviceIp) || null;
 
+  function requestStoreRefresh() {
+    if (!state.selectedDeviceIp) return;
+    if (state.catalogLoading) {
+      state.storeRefreshQueued = true;
+      return;
+    }
+    state.catalogLoading = true;
+    state.catalog = [];
+    const status = q('#storeStatus');
+    const host = q('#storeGrid');
+    if (status) status.textContent = `正在读取服务器目录和 ${state.selectedDeviceIp} 的应用信息…`;
+    if (host) host.innerHTML = '<div class="panel empty-state store-loading-state">正在同步应用商店与设备应用列表…</div>';
+    post('device.store.load');
+  }
+
   function gotoPage(name) {
     if (!pages[name]) return;
     state.currentPage = name;
@@ -45,8 +60,7 @@
     I18n.localize(q('header'));
     if (name === 'control' && state.selectedDeviceIp) post('device.control.refresh', { ip: state.selectedDeviceIp });
     if (name === 'store' && state.selectedDeviceIp) {
-      post('device.control.refresh', { ip: state.selectedDeviceIp });
-      if (!state.catalog.length && !state.catalogLoading) { state.catalogLoading = true; post('device.store.load'); }
+      requestStoreRefresh();
     }
     if (name === 'files' && state.selectedDeviceIp && state.fs.deviceIp !== state.selectedDeviceIp) post('device.fs.list', { path:state.fs.path || '/sd/images' });
     if (name === 'serial' || name === 'setup') post('serial.refresh');
@@ -94,6 +108,7 @@
     else if (type === 'device.speed.result') renderSpeedResult(payload || {});
     else if (type === 'app.error') {
       state.catalogLoading = false;
+      state.storeRefreshQueued = false;
       state.storePendingInstalls.clear();
       state.pcStoreProgress.clear();
       clearTimeout(state.storePollTimer);
@@ -103,7 +118,7 @@
   }
 
   function renderBootstrap(data) {
-    q('#version').textContent = data.version || '0.1.0';
+    q('#version').textContent = data.version || '0.1.1';
     renderWifi(data.wifi);
     renderStats(data.stats);
     renderServices(data.services || []);
@@ -221,8 +236,19 @@
   }
 
   function renderDiscovery(result) {
+    const working = result.status === 'working';
     const isError = result.status === 'error' || result.status === 'not-found';
-    toast(result.message || '正在发现设备', isError);
+    const button = q('#overviewRefreshButton');
+    const status = q('#overviewRefreshStatus');
+    if (button) {
+      button.disabled = working;
+      button.textContent = working ? '正在刷新…' : '刷新设备状态';
+    }
+    if (status) {
+      status.textContent = result.message || (working ? '正在搜索设备' : '等待刷新设备状态');
+      status.className = isError ? 'error' : result.status === 'success' ? 'success' : working ? 'working' : '';
+    }
+    if (!working) toast(result.message || '设备状态刷新完成', isError);
   }
 
   function renderNetworks(networks) {
@@ -325,7 +351,7 @@
     renderDeviceApps(snapshot.state || {});
     renderDeviceSettings(snapshot.settings || {}, snapshot.display || null, snapshot.schedule || null, snapshot.state || {});
     renderDeviceServices(snapshot.state || {});
-    if (state.catalog.length) renderStoreGrid();
+    if (state.catalog.length && !state.catalogLoading) renderStoreGrid();
     if (!state.catalog.length && !state.catalogLoading) {
       state.catalogLoading = true;
       post('device.store.load');
@@ -427,6 +453,8 @@
   }
 
   function renderDeviceSettings(settings, display, schedule, deviceState) {
+    const settingsDeviceBadge = q('#settingsDeviceBadge');
+    if (settingsDeviceBadge) settingsDeviceBadge.textContent = `当前设备 · ${state.selectedDeviceIp || '--'}`;
     const deviceLanguage = I18n.normalize(settings.language || settings.locale || settings.lang || 'zh-CN');
     if (deviceLanguage !== I18n.language) syncLanguageToDevice();
     q('#weatherAddress').value = settings.weather_address || settings.weatherAddress || '';
@@ -545,6 +573,13 @@
   }
 
   function renderStore(payload) {
+    if (payload.snapshot) {
+      state.control = payload.snapshot;
+      state.selectedDeviceIp = payload.ip || payload.snapshot.ip || state.selectedDeviceIp;
+      renderDeviceApps(payload.snapshot.state || {});
+      renderDeviceSettings(payload.snapshot.settings || {}, payload.snapshot.display || null, payload.snapshot.schedule || null, payload.snapshot.state || {});
+      renderDeviceServices(payload.snapshot.state || {});
+    }
     const catalog = payload.catalog || {};
     const installed = installedStoreMap();
     const catalogItems = (Array.isArray(catalog.items) ? catalog.items : [])
@@ -570,6 +605,10 @@
     if (state.control?.state) {
       renderDeviceApps(state.control.state);
       renderDeviceServices(state.control.state);
+    }
+    if (state.storeRefreshQueued) {
+      state.storeRefreshQueued = false;
+      setTimeout(requestStoreRefresh, 0);
     }
   }
 
@@ -705,6 +744,10 @@
   function renderStoreGrid() {
     const host = q('#storeGrid');
     if (!host) return;
+    if (state.catalogLoading) {
+      host.innerHTML = '<div class="panel empty-state store-loading-state">正在同步应用商店与设备应用列表…</div>';
+      return;
+    }
     const installed = installedStoreMap();
     const progress = currentStoreProgress();
     const installMode = q('#storeInstallMode')?.value === 'pc' ? 'pc' : 'device';
@@ -907,6 +950,16 @@
       wifiSelect.disabled = connected;
       const wifiBaud = q('#wifiSerialBaudSelect');
       if (wifiBaud && snapshot?.baudRate) wifiBaud.value = String(snapshot.baudRate);
+      if (wifiBaud) wifiBaud.disabled = connected;
+    }
+    const wifiDisconnect = q('#wifiSerialDisconnect');
+    if (wifiDisconnect) wifiDisconnect.disabled = !connected;
+    if (!connected) {
+      const wifiStatus = q('#wifiSerialProvisionStatus');
+      if (wifiStatus) {
+        wifiStatus.textContent = '未连接';
+        wifiStatus.className = 'status-tag';
+      }
     }
   }
 
@@ -1377,7 +1430,12 @@
 
   qa('.nav-item').forEach(button => button.addEventListener('click', () => gotoPage(button.dataset.page)));
   qa('[data-goto]').forEach(button => button.addEventListener('click', () => gotoPage(button.dataset.goto)));
-  qa('[data-command]').forEach(button => button.addEventListener('click', () => post(button.dataset.command)));
+  qa('[data-command]').forEach(button => button.addEventListener('click', () => {
+    if (button.id === 'overviewRefreshButton') {
+      renderDiscovery({ status:'working', message:'正在准备刷新设备状态' });
+    }
+    post(button.dataset.command);
+  }));
   qa('[data-control-tab]').forEach(button => button.addEventListener('click', () => {
     gotoPage('control');
     state.currentControlTab = button.dataset.controlTab;
@@ -1411,7 +1469,7 @@
     renderSerialStatus(state.serial || {});
     updateLuaMeta();
   });
-  q('#loadStore').addEventListener('click', () => post('device.store.load'));
+  q('#loadStore').addEventListener('click', requestStoreRefresh);
   q('#mirrorSettingsForm')?.addEventListener('submit', event => {
     event.preventDefault();
     post('desktopMirror.settings.save', {
@@ -1425,7 +1483,7 @@
   q('#mirrorStop')?.addEventListener('click', () => post('services.stop', { id:'desktop-mirror' }));
   q('#storeInstallMode').addEventListener('change', event => {
     q('#storeTransferModeField').classList.toggle('hidden', event.target.value !== 'pc');
-    renderStoreGrid();
+    requestStoreRefresh();
   });
   q('#exitCurrentApp').addEventListener('click', () => post('device.app.exit'));
   q('#brightnessRange').addEventListener('input', event => { q('#brightnessValue').textContent = `${event.target.value}%`; });
@@ -1535,6 +1593,7 @@
     port:q('#wifiSerialPortSelect')?.value || '',
     baud:Number(q('#wifiSerialBaudSelect')?.value || 115200)
   }));
+  q('#wifiSerialDisconnect')?.addEventListener('click', () => post('serial.disconnect'));
   q('#wifiSerialProvision')?.addEventListener('click', () => {
     const ssid = q('#wifiSerialSsidSelect')?.value || '';
     const pwd = q('#wifiSerialPassword')?.value || '';

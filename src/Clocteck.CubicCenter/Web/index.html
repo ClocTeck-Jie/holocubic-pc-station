@@ -35,7 +35,7 @@
       </nav>
       <div class="side-bottom">
         <div class="network-mini"><span id="sideWifiDot" class="dot muted"></span><div><small>电脑网络</small><strong id="sideWifi">正在检测</strong></div></div>
-        <div class="version">PREVIEW <span id="version">0.1.0</span></div>
+        <div class="version">PREVIEW <span id="version">0.1.1</span></div>
       </div>
     </aside>
 
@@ -53,7 +53,7 @@
 
       <main>
         <section class="page active" id="page-home">
-          <div class="section-heading home-device-heading"><div><span class="eyebrow">CONNECTED DEVICES</span><h2>已连接设备</h2><p>每个方块显示设备 IP 与当前运行的应用</p></div><button class="button secondary" data-command="device.discover">刷新设备状态</button></div>
+          <div class="section-heading home-device-heading"><div><span class="eyebrow">CONNECTED DEVICES</span><h2>已连接设备</h2><p>每个方块显示设备 IP 与当前运行的应用</p></div><div class="overview-refresh-control"><small id="overviewRefreshStatus">等待刷新设备状态</small><button id="overviewRefreshButton" class="button secondary" data-command="device.discover">刷新设备状态</button></div></div>
           <div id="overviewDeviceGrid" class="overview-device-grid"><div class="panel empty-state">正在读取已连接设备…</div></div>
           <div class="metric-grid">
             <article class="metric"><span>CPU</span><strong id="cpuValue">--%</strong><div class="meter"><i id="cpuMeter"></i></div></article>
@@ -79,7 +79,7 @@
               <label class="wifi-provision-wide"><span>设备扫描到的 Wi‑Fi</span><select id="wifiSerialSsidSelect"><option value="">请先连接串口并扫描</option></select></label>
               <label class="wifi-provision-wide"><span>Wi‑Fi 密码</span><input id="wifiSerialPassword" type="password" autocomplete="off" placeholder="开放网络可留空"></label>
             </div>
-            <div class="button-row"><button id="wifiSerialScan" class="button ghost" type="button">扫描设备 Wi‑Fi</button><button id="wifiSerialProvision" class="button primary" type="button">通过串口配网</button></div>
+            <div class="button-row"><button id="wifiSerialScan" class="button ghost" type="button">扫描设备 Wi‑Fi</button><button id="wifiSerialProvision" class="button primary" type="button">通过串口配网</button><button id="wifiSerialDisconnect" class="button danger" type="button" disabled>断开串口</button></div>
             <small class="serial-wired-note">设备需要通过 USB 数据线有线连接到 PC；点击“扫描设备 Wi‑Fi”时，软件会自动连接串口。</small>
             <div id="wifiSerialHint" class="notice"><strong>请先在设备上打开 WiFi Setting Guide。</strong><span>串口配网页面会通过 USB 返回热点列表，密码不会写入 PC 日志。</span></div>
           </article>
@@ -146,6 +146,10 @@
 
               <div class="control-panel" id="control-settings">
                 <form id="deviceSettingsForm" class="settings-layout">
+                  <div class="settings-intro">
+                    <div><span class="eyebrow">DEVICE PREFERENCES</span><h2>设备设置</h2><p>常用设置、息屏闹钟与系统维护集中管理，保存后立即应用到当前设备。</p></div>
+                    <span id="settingsDeviceBadge" class="settings-device-badge">当前设备</span>
+                  </div>
                   <article class="panel settings-card settings-summary-card weather-settings-card">
                     <span class="eyebrow">WEATHER & TIME</span><h3>天气与时区</h3>
                     <label><span>天气地区</span><input id="weatherAddress" name="weather_address" placeholder="例如 上海市浦东新区"></label>
@@ -336,7 +340,7 @@
         </section>
 
         <section class="page" id="page-about">
-          <article class="panel about-card"><div class="about-logo">CC</div><span class="eyebrow">CLOCTECK SOFTWARE</span><h2>Cubic Center</h2><p>面向 Clocteck Cubic 的 Windows 设备连接、内置控制与上位机服务中心。</p><div class="about-grid"><div><span>当前版本</span><b>0.1.0 Preview</b></div><div><span>运行平台</span><b>.NET 10 / Windows</b></div><div><span>设备识别</span><b>IPv4 地址</b></div><div><span>界面</span><b>本地 WebView2 UI</b></div></div></article>
+          <article class="panel about-card"><div class="about-logo">CC</div><span class="eyebrow">CLOCTECK SOFTWARE</span><h2>Cubic Center</h2><p>面向 Clocteck Cubic 的 Windows 设备连接、内置控制与上位机服务中心。</p><div class="about-grid"><div><span>当前版本</span><b>0.1.1 Preview</b></div><div><span>运行平台</span><b>.NET 10 / Windows</b></div><div><span>设备识别</span><b>IPv4 地址</b></div><div><span>界面</span><b>本地 WebView2 UI</b></div></div></article>
         </section>
       </main>
     </section>

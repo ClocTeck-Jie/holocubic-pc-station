@@ -83,7 +83,7 @@ public sealed class AppController : IAsyncDisposable
         _serialStatusTask = SerialStatusLoopAsync(_lifetime.Token);
         _deviceAppServiceTask = DeviceAppServiceLoopAsync(_lifetime.Token);
         _ = RefreshKnownDevicesAsync();
-        _log.Info("应用", "Clocteck Cubic Center 0.1.0 已启动");
+        _log.Info("应用", "Clocteck Cubic Center 0.1.1 已启动");
     }
 
     public async Task HandleCommandAsync(string json)
@@ -267,7 +267,7 @@ public sealed class AppController : IAsyncDisposable
         var connection = ComputerNetworkService.Resolve(wifiConnection, SelectedDeviceIp);
         await QueueEventAsync("app.bootstrap", new
         {
-            version = "0.1.0",
+            version = "0.1.1",
             wifiAvailable = _wifi is not null,
             wifi = connection,
             devices = _settings.Devices.OrderByDescending(device => device.LastSeen),
@@ -344,20 +344,28 @@ public sealed class AppController : IAsyncDisposable
                 return;
             }
 
-            var matchesScan = !string.IsNullOrWhiteSpace(responseId) &&
-                              string.Equals(responseId, _wifiSerialScanRequestId, StringComparison.Ordinal);
+            var networks = default(JsonElement);
+            var isScanResult = string.Equals(status, "scan_result", StringComparison.OrdinalIgnoreCase) &&
+                               root.TryGetProperty("networks", out networks);
+            var isWifiGuide = string.IsNullOrWhiteSpace(protocolApp) ||
+                              string.Equals(protocolApp, "serial_wifi_setup", StringComparison.OrdinalIgnoreCase) ||
+                              string.Equals(protocolApp, "wifi_guide", StringComparison.OrdinalIgnoreCase);
+            var matchesScan = (!string.IsNullOrWhiteSpace(responseId) &&
+                               string.Equals(responseId, _wifiSerialScanRequestId, StringComparison.Ordinal)) ||
+                              (isScanResult && isWifiGuide);
             var matchesProvision = !string.IsNullOrWhiteSpace(responseId) &&
                                    string.Equals(responseId, _wifiSerialProvisionRequestId, StringComparison.Ordinal);
             if (!matchesScan && !matchesProvision) return;
 
-            if (matchesScan && string.Equals(status, "scan_result", StringComparison.OrdinalIgnoreCase) &&
-                root.TryGetProperty("networks", out var networks))
+            if (matchesScan && isScanResult)
             {
                 QueueEvent("wifi.networks", new
                 {
                     networks = networks.Clone(),
                     currentSsid = root.TryGetProperty("current_ssid", out var currentSsid) ? currentSsid.GetString() : null,
                 });
+                var networkCount = networks.ValueKind == JsonValueKind.Array ? networks.GetArrayLength() : 0;
+                _log.Info("串口配网", $"已同步设备扫描到的 {networkCount} 个 Wi-Fi 热点");
             }
             if (string.Equals(status, "scan_result", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(status, "success", StringComparison.OrdinalIgnoreCase) ||
@@ -384,18 +392,34 @@ public sealed class AppController : IAsyncDisposable
             foreach (var saved in _settings.Devices) saved.Online = false;
             var found = new List<DeviceInfo>();
 
-            var knownTasks = _settings.Devices
-                .Select(device => _discovery.ProbeAsync(device.IpAddress, _lifetime.Token, 1400))
+            var knownAddresses = _settings.Devices
+                .Select(device => device.IpAddress)
+                .Where(address => !string.IsNullOrWhiteSpace(address))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            if (knownTasks.Length > 0)
+            foreach (var address in knownAddresses)
             {
-                found.AddRange((await Task.WhenAll(knownTasks)).Where(device => device is not null).Cast<DeviceInfo>());
+                await QueueEventAsync("device.discovery", new
+                {
+                    status = "working",
+                    message = $"正在搜索 {address}"
+                });
+                var knownDevice = await _discovery.ProbeAsync(address, _lifetime.Token, 1400);
+                if (knownDevice is not null) found.Add(knownDevice);
             }
 
-            var byName = await _discovery.FindAsync(_settings.DeviceHostname, null, TimeSpan.FromSeconds(3), _lifetime.Token);
-            if (byName is not null) found.Add(byName);
-
-            found.AddRange(await _discovery.ScanLocalSubnetsAsync(_lifetime.Token));
+            await QueueEventAsync("device.discovery", new
+            {
+                status = "working",
+                message = "正在读取局域网邻居设备"
+            });
+            found.AddRange(await _discovery.ScanLocalSubnetsAsync(
+                _lifetime.Token,
+                address => QueueEvent("device.discovery", new
+                {
+                    status = "working",
+                    message = $"正在搜索 {address}"
+                })));
             var devices = found
                 .GroupBy(device => device.IpAddress, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.First())
@@ -758,7 +782,7 @@ public sealed class AppController : IAsyncDisposable
         var mirror = _settings.Workers.FirstOrDefault(item => item.Id.Equals("desktop-mirror", StringComparison.OrdinalIgnoreCase));
         if (mirror is not null)
         {
-            var mirrorDirectory = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "desktop-mirror");
+            var mirrorDirectory = Path.Combine(AppContext.BaseDirectory, "resources", "CompanionServices", "desktop-mirror");
             var bundledPython = Path.Combine(mirrorDirectory, "python", "python.exe");
             mirror.Executable = File.Exists(bundledPython) ? bundledPython : "python.exe";
             var mirrorSettings = _settings.DesktopMirror ?? new DesktopMirrorSettings();
@@ -776,8 +800,8 @@ public sealed class AppController : IAsyncDisposable
 
         var worker = _settings.Workers.FirstOrDefault(item => item.Id.Equals("smtc-music", StringComparison.OrdinalIgnoreCase));
         if (worker is null) return;
-        var serviceDirectory = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "smtc");
-        worker.Executable = Path.Combine(AppContext.BaseDirectory, "CompanionServices", "node", "node.exe");
+        var serviceDirectory = Path.Combine(AppContext.BaseDirectory, "resources", "CompanionServices", "smtc");
+        worker.Executable = Path.Combine(AppContext.BaseDirectory, "resources", "CompanionServices", "node", "node.exe");
         worker.Arguments = $"\"{Path.Combine(serviceDirectory, "smtc-bridge.js")}\"";
         worker.WorkingDirectory = serviceDirectory;
         worker.Port = 17865;
@@ -1071,9 +1095,29 @@ public sealed class AppController : IAsyncDisposable
     private async Task LoadDeviceStoreAsync()
     {
         var ip = RequireSelectedDeviceIp();
-        await QueueEventAsync("device.store.status", new { status = "working", message = "电脑正在读取应用商店" });
-        var catalog = await RequireStoreServer().GetCatalogAsync(_lifetime.Token);
-        await QueueEventAsync("device.store", new { ip, catalog });
+        await QueueEventAsync("device.store.status", new
+        {
+            status = "working",
+            message = $"正在同时读取服务器目录和 {ip} 的应用信息"
+        });
+
+        var catalogTask = RequireStoreServer().GetCatalogAsync(_lifetime.Token);
+        var snapshotTask = RequireDeviceApi().GetControlSnapshotAsync(ip, _lifetime.Token);
+        await Task.WhenAll(catalogTask, snapshotTask);
+        var catalog = await catalogTask;
+        var snapshot = await snapshotTask;
+
+        var saved = _settings.Devices.FirstOrDefault(device =>
+            device.IpAddress.Equals(ip, StringComparison.OrdinalIgnoreCase));
+        if (saved is not null)
+        {
+            saved.Online = true;
+            saved.LastSeen = DateTimeOffset.Now;
+            UpdateDeviceRuntime(saved, snapshot.State);
+            await SaveSettingsAsync();
+        }
+
+        await QueueEventAsync("device.store", new { ip, catalog, snapshot });
         await SendPcStoreCacheAsync();
     }
 
@@ -1951,7 +1995,6 @@ public sealed class AppController : IAsyncDisposable
         var snapshot = RequireSerial().Connect(port, baudRate);
         _log.Info("串口", $"已连接 {port} @ {baudRate}");
         await QueueEventAsync("serial.status", snapshot);
-        await EnsureWifiGuideSerialReadyAsync();
     }
 
     private async Task DisconnectSerialAsync()
@@ -1988,7 +2031,21 @@ public sealed class AppController : IAsyncDisposable
             var connection = serial.Snapshot();
             var portName = connection.ConnectedPort;
             var baudRate = connection.BaudRate;
-            for (var attempt = 1; attempt <= 20; attempt++)
+            if (connection.ConnectedAt is { } connectedAt)
+            {
+                var settleDelay = TimeSpan.FromMilliseconds(2500) - (DateTimeOffset.Now - connectedAt);
+                if (settleDelay > TimeSpan.Zero)
+                {
+                    await QueueEventAsync("wifi.serial.status", new
+                    {
+                        status = "waiting",
+                        message = "正在等待设备串口稳定并重新就绪",
+                    });
+                    await Task.Delay(settleDelay, _lifetime.Token);
+                }
+            }
+
+            for (var attempt = 1; attempt <= 30; attempt++)
             {
                 try
                 {
@@ -1998,23 +2055,25 @@ public sealed class AppController : IAsyncDisposable
                         id = handshakeId,
                     }));
                 }
-                catch when (!string.IsNullOrWhiteSpace(portName))
+                catch (Exception error) when (!string.IsNullOrWhiteSpace(portName))
                 {
-                    await Task.Delay(700, _lifetime.Token);
-                    try
+                    _log.Warn("串口配网", $"握手发送失败，等待 USB 串口恢复：{error.Message}");
+                    await QueueEventAsync("wifi.serial.status", new
                     {
-                        serial.Connect(portName, baudRate);
-                    }
-                    catch
+                        status = "waiting",
+                        message = "设备串口正在重新连接，请稍候",
+                    });
+                    if (await TryRestoreWifiSerialAsync(serial, portName, baudRate))
                     {
-                        // The USB serial device may still be re-enumerating.
+                        await Task.Delay(2500, _lifetime.Token);
                     }
                 }
                 var completed = await Task.WhenAny(
                     ready.Task,
-                    Task.Delay(attempt == 1 ? 800 : 1000, _lifetime.Token));
+                    Task.Delay(800, _lifetime.Token));
                 if (completed == ready.Task && await ready.Task)
                 {
+                    _log.Info("串口配网", $"设备串口已就绪（握手尝试 {attempt} 次）");
                     return;
                 }
             }
@@ -2026,6 +2085,29 @@ public sealed class AppController : IAsyncDisposable
             _wifiSerialReadySignal = null;
             _wifiSerialHandshakeLock.Release();
         }
+    }
+
+    private async Task<bool> TryRestoreWifiSerialAsync(SerialMonitorService serial, string portName, int baudRate)
+    {
+        for (var attempt = 1; attempt <= 20; attempt++)
+        {
+            _lifetime.Token.ThrowIfCancellationRequested();
+            if (serial.Snapshot().Ports.Contains(portName, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    serial.Reconnect(portName, baudRate);
+                    _log.Info("串口配网", $"USB 串口 {portName} 已恢复");
+                    return true;
+                }
+                catch (Exception error) when (attempt < 20)
+                {
+                    _log.Warn("串口配网", $"USB 串口恢复尝试 {attempt} 失败：{error.Message}");
+                }
+            }
+            await Task.Delay(300, _lifetime.Token);
+        }
+        return false;
     }
 
     private static string NormalizeDeviceDirectory(string? path)

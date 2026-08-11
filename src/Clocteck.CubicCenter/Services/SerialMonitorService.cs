@@ -6,7 +6,8 @@ namespace Clocteck.CubicCenter.Services;
 public sealed class SerialMonitorService : IDisposable
 {
     private readonly object _sync = new();
-    private SerialPort? _port;
+    private WindowsSerialConnection? _connection;
+    private Decoder _decoder = new UTF8Encoding(false, false).GetDecoder();
     private string? _lastError;
     private long _receivedBytes;
     private DateTimeOffset? _connectedAt;
@@ -22,9 +23,9 @@ public sealed class SerialMonitorService : IDisposable
         {
             return new SerialMonitorSnapshot(
                 GetPorts(),
-                _port?.PortName,
-                _port?.BaudRate ?? 115200,
-                _port?.IsOpen == true,
+                _connection?.PortName,
+                _connection?.BaudRate ?? 115200,
+                _connection?.IsOpen == true,
                 _lastError,
                 _receivedBytes,
                 _connectedAt);
@@ -38,7 +39,13 @@ public sealed class SerialMonitorService : IDisposable
         return snapshot;
     }
 
-    public SerialMonitorSnapshot Connect(string portName, int baudRate)
+    public SerialMonitorSnapshot Connect(string portName, int baudRate) =>
+        ConnectCore(portName, baudRate, forceReconnect: false);
+
+    public SerialMonitorSnapshot Reconnect(string portName, int baudRate) =>
+        ConnectCore(portName, baudRate, forceReconnect: true);
+
+    private SerialMonitorSnapshot ConnectCore(string portName, int baudRate, bool forceReconnect)
     {
         portName = (portName ?? string.Empty).Trim();
         if (!GetPorts().Contains(portName, StringComparer.OrdinalIgnoreCase))
@@ -52,31 +59,37 @@ public sealed class SerialMonitorService : IDisposable
 
         lock (_sync)
         {
-            CloseLocked();
-            var port = new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One)
+            if (!forceReconnect &&
+                _connection?.IsOpen == true &&
+                string.Equals(_connection.PortName, portName, StringComparison.OrdinalIgnoreCase) &&
+                _connection.BaudRate == baudRate)
             {
-                Encoding = new UTF8Encoding(false, false),
-                DtrEnable = false,
-                RtsEnable = false,
-                ReadTimeout = 500,
-                WriteTimeout = 500,
-            };
-            port.DataReceived += OnDataReceived;
-            port.ErrorReceived += OnErrorReceived;
+                // Keep the existing USB CDC session alive. Closing and reopening an
+                // ESP32-S3 native serial port can toggle its control-line state and
+                // cause USB_UART_CHIP_RESET on some Windows drivers.
+                return Snapshot();
+            }
+
+            CloseLocked();
+            var connection = new WindowsSerialConnection(portName, baudRate);
+            connection.BytesReceived += OnBytesReceived;
+            connection.ErrorReceived += OnErrorReceived;
             try
             {
-                port.Open();
-                _port = port;
+                _connection = connection;
                 _lastError = null;
                 _receivedBytes = 0;
                 _connectedAt = DateTimeOffset.Now;
                 _lineBuffer = string.Empty;
+                _decoder = new UTF8Encoding(false, false).GetDecoder();
+                connection.Start();
             }
             catch
             {
-                port.DataReceived -= OnDataReceived;
-                port.ErrorReceived -= OnErrorReceived;
-                port.Dispose();
+                _connection = null;
+                connection.BytesReceived -= OnBytesReceived;
+                connection.ErrorReceived -= OnErrorReceived;
+                connection.Dispose();
                 throw;
             }
         }
@@ -99,23 +112,25 @@ public sealed class SerialMonitorService : IDisposable
         line ??= string.Empty;
         lock (_sync)
         {
-            if (_port is null || !_port.IsOpen) throw new InvalidOperationException("串口尚未连接。");
-            _port.Write(line.EndsWith("\n", StringComparison.Ordinal) ? line : line + "\n");
+            if (_connection is null || !_connection.IsOpen) throw new InvalidOperationException("串口尚未连接。");
+            var text = line.EndsWith("\n", StringComparison.Ordinal) ? line : line + "\n";
+            _connection.Write(Encoding.UTF8.GetBytes(text));
         }
     }
 
-    private void OnDataReceived(object sender, SerialDataReceivedEventArgs args)
+    private void OnBytesReceived(object? sender, SerialBytesReceivedEventArgs args)
     {
         string text;
         long receivedBytes;
         lock (_sync)
         {
-            if (_port is null || !_port.IsOpen) return;
+            if (!ReferenceEquals(sender, _connection) || _connection?.IsOpen != true) return;
             try
             {
-                var pendingBytes = _port.BytesToRead;
-                text = _port.ReadExisting();
-                _receivedBytes += pendingBytes;
+                var chars = new char[Encoding.UTF8.GetMaxCharCount(args.Bytes.Length)];
+                _decoder.Convert(args.Bytes, chars, flush: false, out _, out var charsUsed, out _);
+                text = new string(chars, 0, charsUsed);
+                _receivedBytes += args.Bytes.Length;
                 receivedBytes = _receivedBytes;
             }
             catch (Exception error)
@@ -146,16 +161,23 @@ public sealed class SerialMonitorService : IDisposable
         {
             var trimmed = line.TrimEnd('\r');
             const string prefix = "@CUBIC_WIFI/1 ";
-            if (trimmed.StartsWith(prefix, StringComparison.Ordinal))
+            var prefixIndex = trimmed.IndexOf(prefix, StringComparison.Ordinal);
+            if (prefixIndex >= 0)
             {
-                ProtocolReceived?.Invoke(this, new SerialProtocolMessage(DateTimeOffset.Now, trimmed[prefix.Length..]));
+                ProtocolReceived?.Invoke(this, new SerialProtocolMessage(
+                    DateTimeOffset.Now,
+                    trimmed[(prefixIndex + prefix.Length)..]));
             }
         }
     }
 
-    private void OnErrorReceived(object sender, SerialErrorReceivedEventArgs args)
+    private void OnErrorReceived(object? sender, SerialConnectionErrorEventArgs args)
     {
-        lock (_sync) _lastError = args.EventType.ToString();
+        lock (_sync)
+        {
+            if (!ReferenceEquals(sender, _connection)) return;
+            _lastError = args.Error.Message;
+        }
         PublishStatus();
     }
 
@@ -168,14 +190,15 @@ public sealed class SerialMonitorService : IDisposable
 
     private void CloseLocked()
     {
-        if (_port is null) return;
-        _port.DataReceived -= OnDataReceived;
-        _port.ErrorReceived -= OnErrorReceived;
-        try { if (_port.IsOpen) _port.Close(); } catch { }
-        _port.Dispose();
-        _port = null;
+        if (_connection is null) return;
+        var connection = _connection;
+        _connection = null;
+        connection.BytesReceived -= OnBytesReceived;
+        connection.ErrorReceived -= OnErrorReceived;
+        connection.Dispose();
         _connectedAt = null;
         _lineBuffer = string.Empty;
+        _decoder = new UTF8Encoding(false, false).GetDecoder();
     }
 
     private static string[] GetPorts() => SerialPort.GetPortNames()

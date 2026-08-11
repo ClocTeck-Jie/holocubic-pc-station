@@ -25,49 +25,14 @@ public sealed class DeviceDiscoveryService
 
     public DeviceDiscoveryService(AppLog log) => _log = log;
 
-    public async Task<DeviceInfo?> FindAsync(string hostname, string? lastIp, TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        var deadline = DateTimeOffset.UtcNow + timeout;
-        var candidates = new List<string>();
-        if (!string.IsNullOrWhiteSpace(lastIp)) candidates.Add(lastIp);
-        candidates.Add(hostname);
-
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                var found = await ProbeAsync(candidate, cancellationToken);
-                if (found is not null) return found;
-            }
-
-            try
-            {
-                var addresses = await Dns.GetHostAddressesAsync(hostname, cancellationToken);
-                foreach (var address in addresses.Where(address => address.AddressFamily == AddressFamily.InterNetwork))
-                {
-                    var text = address.ToString();
-                    if (!candidates.Contains(text, StringComparer.OrdinalIgnoreCase)) candidates.Insert(0, text);
-                }
-            }
-            catch (Exception error) when (error is SocketException or OperationCanceledException)
-            {
-                if (error is OperationCanceledException) throw;
-            }
-
-            await Task.Delay(2500, cancellationToken);
-        }
-
-        _log.Warn("设备发现", $"在 {timeout.TotalSeconds:0} 秒内没有解析到 {hostname}");
-        return null;
-    }
-
     public async Task<DeviceInfo?> ScanLocalSubnetAsync(CancellationToken cancellationToken)
     {
         return (await ScanLocalSubnetsAsync(cancellationToken)).FirstOrDefault();
     }
 
-    public async Task<IReadOnlyList<DeviceInfo>> ScanLocalSubnetsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<DeviceInfo>> ScanLocalSubnetsAsync(
+        CancellationToken cancellationToken,
+        Action<string>? probingAddress = null)
     {
         var candidates = await GetNeighborCandidatesAsync(cancellationToken);
         if (candidates.Length == 0) return [];
@@ -79,6 +44,7 @@ public sealed class DeviceDiscoveryService
             await semaphore.WaitAsync(cancellationToken);
             try
             {
+                probingAddress?.Invoke(candidate.Address);
                 var ping = await TryPingAsync(candidate.Address, cancellationToken);
                 var name = await TryResolveNameAsync(candidate.Address, cancellationToken);
                 if (!string.IsNullOrWhiteSpace(name))
@@ -122,7 +88,7 @@ public sealed class DeviceDiscoveryService
                 if (!LooksLikeClocteck(path, text)) continue;
                 var ip = await ResolveIpv4Async(host, timeout.Token) ?? host;
                 var deviceId = TryReadDeviceId(text);
-                var info = new DeviceInfo("clocteck-cubic.local", ip, $"http://{ip}/", deviceId, path.StartsWith("/api/") ? text : null);
+                var info = new DeviceInfo("Clocteck Cubic", ip, $"http://{ip}/", deviceId, path.StartsWith("/api/") ? text : null);
                 _log.Info("设备发现", $"发现设备 {ip}");
                 return info;
             }

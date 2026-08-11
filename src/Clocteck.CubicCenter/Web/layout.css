@@ -108,9 +108,9 @@ select { overflow-y: auto; }
 .store-filter-tabs button:hover { color: #e1e9e4; background: #171c19; }
 .store-filter-tabs button.active { border-color: #4a5b43; color: #eff5f1; background: linear-gradient(180deg, #2e3832, #202722); box-shadow: 0 8px 18px rgba(0,0,0,.2); font-weight: 700; }
 .store-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); max-height: calc(100vh - 328px); gap: 12px; padding-right: 4px; overflow-y: auto; }
-.store-card { position: relative; display: flex; min-height: 226px; padding: 18px; flex-direction: column; overflow: hidden; border-radius: 18px; background: radial-gradient(circle at 9% 5%, rgba(198,250,56,.055), transparent 28%), linear-gradient(145deg, #151a17, #0c100e 78%); transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease; }
+.store-card { position: relative; display: flex; min-height: 226px; padding: 18px; flex-direction: column; overflow: hidden; border-radius: 18px; background: radial-gradient(circle at 9% 5%, rgba(198,250,56,.055), transparent 28%), linear-gradient(145deg, #151a17, #0c100e 78%); }
 .store-card::after { position: absolute; right: -30px; top: -38px; width: 94px; height: 94px; border: 1px solid rgba(198,250,56,.045); border-radius: 30px; content: ""; transform: rotate(24deg); pointer-events: none; }
-.store-card:hover { transform: translateY(-3px); border-color: #445247; box-shadow: 0 16px 32px rgba(0,0,0,.26); }
+.store-card:hover { transform: none; border-color: var(--line); box-shadow: none; }
 .store-card-main { position: relative; z-index: 1; display: flex; min-width: 0; gap: 15px; }
 .store-card .app-letter { width: 70px; height: 70px; border-color: #303733; border-radius: 18px; background: #111512; color: #aeb8b2; font-size: 18px; box-shadow: 0 9px 22px rgba(0,0,0,.24); }
 .store-card-copy { min-width: 0; flex: 1; }
@@ -202,12 +202,24 @@ select { overflow-y: auto; }
 .lua-code-editor { display: block; width: 100%; height: calc(100% - 111px); resize: none; padding: 16px 18px; border: 0; outline: 0; tab-size: 2; background: #050706; color: #d7e1da; caret-color: #c6fa38; font: 11px/1.65 Consolas,"Microsoft YaHei UI",monospace; white-space: pre; }
 .lua-editor-status { display: flex; height: 36px; align-items: center; justify-content: space-between; padding: 0 14px; border-top: 1px solid #252d28; color: #68746c; background: #0d110f; font: 9px Consolas,monospace; }
 
-.settings-layout { grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: stretch; gap: 12px; }
-.settings-card { display: flex; min-width: 0; padding: 19px; flex-direction: column; border-radius: 13px; }
-.settings-summary-card { grid-column: span 3; min-height: 286px; }
-.settings-card h3 { min-height: 20px; margin: 7px 0 10px; }
-.settings-card > label:first-of-type { margin-top: 7px; }
-.settings-card label > span { min-height: 14px; align-items: center; }
+.settings-layout { grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: stretch; gap: 14px; }
+.settings-intro { grid-column: 1 / -1; display: flex; min-height: 96px; padding: 20px 23px; align-items: center; justify-content: space-between; gap: 18px; border: 1px solid #313c34; border-radius: 18px; background: radial-gradient(circle at 92% 15%, rgba(198,250,56,.12), transparent 31%), linear-gradient(135deg,#171d19,#0d110f 72%); }
+.settings-intro h2 { margin: 6px 0 4px; color: #f1f6f3; font-size: 21px; }
+.settings-intro p { margin: 0; color: #89958d; font-size: 11px; line-height: 1.6; }
+.settings-device-badge { display: inline-flex; height: 31px; padding: 0 13px; align-items: center; border: 1px solid #4b5c3e; border-radius: 999px; color: #dfffa0; background: #151d10; font-size: 10px; white-space: nowrap; }
+.settings-card { position: relative; display: flex; min-width: 0; padding: 22px; flex-direction: column; overflow: hidden; border-color: #29332d; border-radius: 16px; background: linear-gradient(145deg,#131815,#0c100e); }
+.settings-card::before { position: absolute; top: 0; left: 20px; width: 42px; height: 2px; border-radius: 2px; background: linear-gradient(90deg,#c6fa38,transparent); content: ""; }
+.settings-summary-card { min-height: 260px; }
+.weather-settings-card, .display-settings-card { grid-column: span 6; }
+.startup-network-settings-card { grid-column: span 5; }
+.schedule-settings-card { grid-column: span 7; }
+.settings-card h3 { min-height: 20px; margin: 8px 0 14px; color: #eff5f1; font-size: 16px; }
+.settings-card > label:first-of-type { margin-top: 4px; }
+.settings-card label { margin-top: 12px; }
+.settings-card label > span { min-height: 14px; margin-bottom: 8px; align-items: center; color: #8a968e; font-size: 10.5px; }
+.settings-card input:not([type="range"]), .settings-card select { height: 40px; border-color: #333d36; border-radius: 11px; background: #090d0b; }
+.settings-card input:not([type="range"]):focus, .settings-card select:focus { border-color: #667d42; box-shadow: 0 0 0 3px rgba(198,250,56,.07); }
+.settings-card input[type="range"] { height: 24px; }
 .settings-card .button { align-self: flex-start; }
 .settings-note { margin: auto 0 0; color: #7d8981; font-size: 10px; line-height: 1.55; }
 .display-settings-card #wakeDisplay, .schedule-settings-card #openAlarmService { margin-top: auto; }
@@ -217,7 +229,7 @@ select { overflow-y: auto; }
 .alarm-heading .button { margin-top: 0; }
 .time-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .alarm-rows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
-.alarm-row { display: grid; grid-template-columns: 1fr; gap: 9px; align-content: start; padding: 13px; border: 1px solid #29322d; border-radius: 11px; background: #0c100e; }
+.alarm-row { display: grid; grid-template-columns: 1fr; gap: 9px; align-content: start; padding: 15px; border: 1px solid #303a33; border-radius: 13px; background: #090d0b; }
 .alarm-row label { margin: 0; }
 .alarm-enable { display: flex !important; min-height: 25px; align-items: center; gap: 7px; color: #a4afa8; font-size: 10px; }
 .alarm-enable input { width: 15px !important; height: 15px !important; accent-color: #c6fa38; }
@@ -226,7 +238,7 @@ select { overflow-y: auto; }
 .firmware-heading { display: flex; align-items: flex-start; justify-content: space-between; }
 .firmware-heading h3 { margin-bottom: 0; }
 .firmware-version-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 17px; }
-.firmware-version-grid > div { padding: 12px 14px; border: 1px solid #2a332e; border-radius: 9px; background: #0c100e; }
+.firmware-version-grid > div { padding: 14px 16px; border: 1px solid #303a33; border-radius: 12px; background: #090d0b; }
 .firmware-version-grid span { display: block; color: #748078; font-size: 9px; }
 .firmware-version-grid b { display: block; margin-top: 6px; color: #e3ebe6; font: 15px Consolas; }
 .firmware-note { min-height: 18px; margin: 13px 0 9px; color: #7d8981; font-size: 10px; }
@@ -239,8 +251,26 @@ select { overflow-y: auto; }
 @media (max-width: 1180px) {
   .app-workbench, .service-workbench { grid-template-columns: minmax(250px, 40%) minmax(0, 1fr); }
   .settings-summary-card { grid-column: span 6; }
-  .schedule-settings-card { grid-column: 1 / -1; min-height: 0; }
+  .startup-network-settings-card, .schedule-settings-card { grid-column: span 6; }
 }
+
+/* Keep the three overview card groups on one 12px spacing rhythm. */
+#page-home .overview-device-grid, #page-home .metric-grid, #page-home #serviceSummary { gap: 12px; }
+#page-home .metric-grid { margin: 12px 0 0; }
+#page-home #serviceSummary { margin-top: 12px; }
+
+/* Compact companion-service squares: half the device-card edge length. */
+#serviceSummary.service-summary { grid-template-columns: repeat(auto-fill, 110px); gap: 12px; justify-content: start; }
+#serviceSummary .service-overview-card { width: 110px; height: 110px; min-height: 0; padding: 10px; gap: 7px; border-radius: 12px; }
+#serviceSummary .service-overview-card:hover { transform: none; }
+#serviceSummary .service-overview-card > .button { width: 100%; height: 25px; min-width: 0; padding: 0 5px; align-self: stretch; border-radius: 8px; overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+#serviceSummary .running-service-main { display: grid; min-width: 0; grid-template-columns: 30px minmax(0,1fr); gap: 7px; align-items: start; }
+#serviceSummary .service-icon { width: 30px; height: 30px; border-radius: 8px; font-size: 9px; }
+#serviceSummary .running-service-main .row { display: block; min-width: 0; }
+#serviceSummary .running-service-main h4 { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+#serviceSummary .running-service-main .status-tag { display: inline-block; margin-top: 5px; padding: 2px 5px; font-size: 7px; }
+#serviceSummary .running-service-main p, #serviceSummary .running-service-main small { display: none; }
+.store-loading-state { grid-column: 1 / -1; min-height: 180px; }
 @media (max-width: 1050px) {
   .store-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .media-path-presets { grid-template-columns: repeat(2,minmax(0,1fr)); }
@@ -271,3 +301,8 @@ select { overflow-y: auto; }
 .wifi-provision-wide { grid-column: 1 / -1; }
 .panel-description { color:#7f8c84; font-size:11px; margin:8px 0 0; }
 .serial-wired-note { display:block; margin-top:10px; color:#7f8c84; font-size:10px; line-height:1.5; }
+.overview-refresh-control { display:flex; flex-direction:column; align-items:flex-end; gap:6px; min-width:250px; }
+.overview-refresh-control small { max-width:340px; color:#6f7b74; font:10px Consolas,"Microsoft YaHei UI"; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.overview-refresh-control small.working { color:#dfffa0; }
+.overview-refresh-control small.success { color:#9ad968; }
+.overview-refresh-control small.error { color:#ff9898; }

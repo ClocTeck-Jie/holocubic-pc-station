@@ -17,6 +17,15 @@ Holocubic PC Station 是面向 Clocteck Cubic / Holocubic 设备的 Windows 电�
 - 配置并启动 320 × 240 桌面投屏服务，支持显示器、虚拟副屏和指定区域。
 - 内置 Holo PC Monitor、Holopet、Codex Buddy 和 SMTC Music 等电脑端兼容服务。
 
+## 0.1.1 更新内容
+
+- 应用商店同时读取服务器目录和当前设备应用信息，完成合并后再显示安装、更新和卸载操作。
+- 切换设备下载与 PC 下载时自动刷新商店，修复版本判断和卡片悬停跳动问题。
+- 重新设计设备设置页面、总览设备卡和电脑服务卡布局。
+- 设备刷新过程显示正在检查的 IP，仅扫描已保存地址和 Windows 邻居表，不再搜索固定 mDNS 域名。
+- 改进 USB 串口连接方式，修复 WiFi Setting Guide 扫描结果未同步到 PCAPP 的问题。
+- 保留 FS、DevTools 与 RAM 多设备测速、文件管理、Lua 编辑和电脑端服务自动配置功能。
+
 ## 0.1.0 更新内容
 
 - 首个公开发布版本，提供设备发现、应用管理、应用商店、设备设置和服务管理。
@@ -53,14 +62,17 @@ dotnet run --project .\src\Clocteck.CubicCenter\Clocteck.CubicCenter.csproj
 ```powershell
 dotnet publish .\src\Clocteck.CubicCenter\Clocteck.CubicCenter.csproj `
   -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
   -o .\artifacts\win-x64
 ```
+
+正式 ZIP 的根目录只保留可直接双击的 `Holocubic PC Station.exe`；网页、Node、Python 和电脑端服务资源统一位于 `resources` 文件夹。
 
 ## SMTC Music 与 Node.js
 
 源码仓库不提交约 92 MB 的第三方 `node.exe`。程序启动 SMTC Music 服务时按以下顺序查找：
 
-1. `CompanionServices/node/node.exe`
+1. `resources/CompanionServices/node/node.exe`（发布包）或 `CompanionServices/node/node.exe`（源码目录）
 2. 系统 `PATH` 中的 `node.exe`
 
 需要制作完全便携的发布包时，可以将 Windows x64 版 Node.js 可执行文件放到：
