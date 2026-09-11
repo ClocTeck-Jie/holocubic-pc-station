@@ -1,0 +1,6 @@
+'use strict';
+const labels={idle:'空闲',thinking:'思考中',working:'执行中',building:'协作中',notification:'等待确认',done:'已完成',error:'出错',sleeping:'休眠'};
+async function refresh(){const data=await chrome.storage.local.get({enabled:true,last:null,connectionError:''});document.querySelector('#enabled').checked=data.enabled;const last=data.last;document.querySelector('#last').textContent=last?last.project+' · '+(last.event==='Unrecognized'?'未识别':labels[last.state]||last.state)+' · '+new Date(last.sent_at).toLocaleTimeString():'未识别到活动';const health=await chrome.runtime.sendMessage({kind:'health'});document.querySelector('#connection').textContent=health.ok?'Holopet 服务已连接':'Holopet 服务未连接'}
+document.querySelector('#enabled').addEventListener('change',async e=>{await chrome.storage.local.set({enabled:e.target.checked});document.querySelector('#message').textContent=e.target.checked?'自动同步已开启':'自动同步已暂停'});
+document.querySelectorAll('[data-state]').forEach(button=>button.addEventListener('click',async()=>{button.disabled=true;try{const result=await chrome.runtime.sendMessage({kind:'manual',state:button.dataset.state});document.querySelector('#message').textContent=result.ok?'状态已发送':result.error||'发送失败';await refresh()}finally{button.disabled=false}}));
+refresh().catch(()=>{document.querySelector('#connection').textContent='请重新加载扩展'});

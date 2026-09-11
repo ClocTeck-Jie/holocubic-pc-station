@@ -1,100 +1,45 @@
-# Holocubic PC Station
+# Holocubic 控制台（Windows）
 
-Holocubic PC Station 是面向 Clocteck Cubic / Holocubic 设备的 Windows 电脑端控制中心。当前程序内部名称为 **Clocteck Cubic Center**，使用 C#、.NET 10、WPF 和内置 WebView2 界面实现。
+当前版本：**0.4.7**。基于 Electron 的 Holocubic 桌面控制台。
 
-## 主要功能
+## 下载与使用
 
-- 发现局域网设备，也可以手动输入 IPv4 地址连接多台设备。
-- 查看设备状态、当前应用、Wi-Fi RSSI 和电脑端服务状态。
-- 启动设备应用，并在软件内分屏加载应用控制页面。
-- 浏览应用商店、查看介绍、下载应用包，并通过固件 FS 或 DevTools 接口安装到设备。
-- 管理语言、天气、时区、亮度、息屏、闹钟、服务和固件更新。
-- 通过固件 FS API 浏览、上传、下载、重命名、复制和删除设备文件。
-- 上传图片或 GIF 时按设备屏幕比例处理媒体；Lua 文件可跳转到开发工具编辑。
-- 串口实时输出、软件运行日志和 Lua 开发工具。
-- 通过 USB 串口为设备扫描 WiFi 并发送配网信息，无需让电脑切换到设备热点。
-- 对多台设备执行 FS、DevTools 或 RAM 网络吞吐、碎片文件和 API 延迟测试。
-- 配置并启动 320 × 240 桌面投屏服务，支持显示器、虚拟副屏和指定区域。
-- 内置 Holo PC Monitor、Holopet、Codex Buddy 和 SMTC Music 等电脑端兼容服务。
+从 [Releases](https://github.com/ClocTeck-Jie/holocubic-pc-station/releases/latest) 下载 `holocubic-console-v0.4.7-win-x64.zip`，完整解压后打开文件夹中的 **holocubic控制台.exe**。请保留旁边的 DLL、locales 和 resources 文件夹。
 
-## 0.1.1 更新内容
+## 功能
 
-- 应用商店同时读取服务器目录和当前设备应用信息，完成合并后再显示安装、更新和卸载操作。
-- 切换设备下载与 PC 下载时自动刷新商店，修复版本判断和卡片悬停跳动问题。
-- 重新设计设备设置页面、总览设备卡和电脑服务卡布局。
-- 设备刷新过程显示正在检查的 IP，仅扫描已保存地址和 Windows 邻居表，不再搜索固定 mDNS 域名。
-- 改进 USB 串口连接方式，修复 WiFi Setting Guide 扫描结果未同步到 PCAPP 的问题。
-- 保留 FS、DevTools 与 RAM 多设备测速、文件管理、Lua 编辑和电脑端服务自动配置功能。
+- 扫描局域网并自动添加设备、手动添加、设备重命名。
+- 在内嵌浏览器中打开设备 Web 应用，应用控制窗口独立弹出。
+- 文件管理、上传下载、传输队列、进度与速度显示。
+- 串口配网、串口日志、设备重启与异常记录。
+- 电脑性能监控、传感器数据映射、音乐、Holopet、AI 状态和桌面镜像服务。
+- 简体中文、繁体中文、英语、日语、德语界面。
+- 软件更新清单与 SHA-256 校验。AI 状态、额度和上下文信息取决于对应客户端可提供的数据，并非所有来源均提供全部字段。
 
-## 0.1.0 更新内容
+## 更新
 
-- 首个公开发布版本，提供设备发现、应用管理、应用商店、设备设置和服务管理。
-- 新增固件 FS 文件管理、Lua 编辑、串口日志、网络测速和固件更新界面。
-- 集成 Holo PC Monitor、Holopet、Codex Buddy、SMTC Music 与桌面投屏电脑服务。
-- 新增 WiFi Setting Guide USB 串口配网流程，扫描时自动连接串口并显示准确的密码错误信息。
-- 支持按设备 IP 管理多台设备，并根据设备当前应用自动启动或停止对应电脑服务。
+完整程序包适合首次安装。`holocubic-update-0.4.7.zip` 是控制台应用更新包，不包含 Electron 运行时。
+可在软件更新设置中使用清单地址：
+`https://github.com/ClocTeck-Jie/holocubic-pc-station/releases/latest/download/latest.json`
 
-## 环境要求
+## 源码和构建
 
-- Windows 10/11 x64
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- Microsoft Edge WebView2 Runtime
-- 可选：Node.js 24 或兼容版本，仅 SMTC Music 服务需要
-- 从源码运行桌面投屏时需要 Python 3.12、Pillow 和 mss；Release ZIP 已内置所需 Python 环境
+当前实现位于 `src/Holocubic.Console`；原 WPF 实现保留在 `src/Clocteck.CubicCenter`，旧说明见 [历史说明](docs/legacy-pc-station.md)。
 
-应用管理、文件管理和设备设置不依赖 Node.js。
+Windows 构建需要 Electron 43.6.0（win32-x64）、.NET 10 SDK 和 Rust MSVC 工具链：
 
-桌面投屏源码依赖可通过以下命令安装：
+1. 下载并解压官方 Electron 43.6.0 Windows x64 运行时。
+2. 将 `src/Holocubic.Console` 复制到运行时的 `resources/app`。
+3. 执行 `dotnet publish src/Holocubic.Console/native-source/HoloNative.csproj -c Release -r win-x64 --self-contained true -o native-build`，将 `HoloNative.exe` 放入 `resources/app/native`。
+4. 在 `src/SmtcBridgeRust` 执行 `cargo build --release --locked`，将生成的桥接程序复制为 `resources/app/services/smtc/smtc-bridge.exe`。
+5. 将运行时 `electron.exe` 重命名为 `holocubic控制台.exe` 并启动。应用图标可在打包时使用 `resources/app/assets/app.ico`。
 
-```powershell
-py -3 -m pip install -r .\src\Clocteck.CubicCenter\CompanionServices\desktop-mirror\requirements.txt
-```
+仓库不提交运行时和编译后二进制；这些包含在 Release 完整包中。
 
-## 编译运行
+## 已知问题
 
-```powershell
-dotnet restore .\src\Clocteck.CubicCenter\Clocteck.CubicCenter.csproj
-dotnet run --project .\src\Clocteck.CubicCenter\Clocteck.CubicCenter.csproj
-```
+360 曾对内置 `smtc-bridge.exe` 报告 `HEUR/QVM202.0.F926.Malware.Gen`。目前尚未获得 360 的核验结果，本版仍包含该组件，并未宣称已解决该检测。不要通过关闭安全防护绕过提示。
 
-生成 Release 版本：
+## 许可
 
-```powershell
-dotnet publish .\src\Clocteck.CubicCenter\Clocteck.CubicCenter.csproj `
-  -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-  -o .\artifacts\win-x64
-```
-
-正式 ZIP 的根目录只保留可直接双击的 `Holocubic PC Station.exe`；网页、Node、Python 和电脑端服务资源统一位于 `resources` 文件夹。
-
-## SMTC Music 与 Node.js
-
-源码仓库不提交约 92 MB 的第三方 `node.exe`。程序启动 SMTC Music 服务时按以下顺序查找：
-
-1. `resources/CompanionServices/node/node.exe`（发布包）或 `CompanionServices/node/node.exe`（源码目录）
-2. 系统 `PATH` 中的 `node.exe`
-
-需要制作完全便携的发布包时，可以将 Windows x64 版 Node.js 可执行文件放到：
-
-```text
-src/Clocteck.CubicCenter/CompanionServices/node/node.exe
-```
-
-Node.js 的许可证文本保留在同一目录的 `LICENSE` 中。
-
-## 运行数据
-
-程序采用便携模式，将本机设置、设备列表、服务配置、应用下载缓存和 WebView2 数据保存在运行目录中。这些内容可能包含局域网设备地址和个人设置，已通过 `.gitignore` 排除，不应提交到仓库。
-
-## 相关项目
-
-- [holocubic-apps](https://github.com/clocteck/holocubic-apps)
-- [holopet](https://github.com/clocteck/holopet)
-- [codex_buddy](https://github.com/clocteck/codex_buddy)
-- [desktop-mirror](https://github.com/clocteck/desktop-mirror)
-- [holocubic-smtc-music](https://github.com/clocteck/holocubic-smtc-music)
-
-## 许可证
-
-项目以 GNU General Public License v3.0 发布。第三方组件仍遵循各自许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+控制台采用 GPL-3.0-only；第三方组件保留各自许可，见 LICENSE 和 THIRD_PARTY_NOTICES.md。Electron 的许可随完整程序包附带。

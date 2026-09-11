@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "Holopet · AI 状态同步",
+  "version": "1.0.0",
+  "description": "将常见 AI 网页的工作状态同步到 Holocubic，聊天正文不会发送到设备。",
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:17321/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Holopet AI 状态"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://chat.deepseek.com/*",
+        "https://www.kimi.com/*",
+        "https://kimi.com/*",
+        "https://kimi.moonshot.cn/*",
+        "https://www.doubao.com/*",
+        "https://chat.qwen.ai/*",
+        "https://tongyi.aliyun.com/*",
+        "https://www.qianwen.com/*",
+        "https://grok.com/*"
+      ],
+      "js": [
+        "network.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://chat.deepseek.com/*",
+        "https://www.kimi.com/*",
+        "https://kimi.com/*",
+        "https://kimi.moonshot.cn/*",
+        "https://www.doubao.com/*",
+        "https://chat.qwen.ai/*",
+        "https://tongyi.aliyun.com/*",
+        "https://www.qianwen.com/*",
+        "https://grok.com/*"
+      ],
+      "js": [
+        "providers.js",
+        "detector.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

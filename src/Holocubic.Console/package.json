@@ -1,0 +1,9 @@
+{
+  "license": "GPL-3.0-only",
+  "productName": "holocubic控制台",
+  "description": "Holocubic desktop console with embedded device Web UI",
+  "name": "holocubic-console",
+  "version": "0.4.7",
+  "main": "main.cjs",
+  "private": true
+}

@@ -13,5 +13,3 @@
 - [ColdMistyRain/smtc-brige](https://github.com/ColdMistyRain/smtc-brige)：内置 Rust SMTC Bridge 的上游项目，PCAPP 版增加了 QQ 音乐进度校正与封面兼容修复
 
 NuGet 依赖会在还原和构建时下载，本仓库不提交其二进制构建产物。
-
-- Electron 43.6.0 / Chromium：运行时许可随 Release 的 `程序文件` 目录提供。
