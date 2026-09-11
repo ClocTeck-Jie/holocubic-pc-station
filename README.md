@@ -1,10 +1,10 @@
 # Holocubic 控制台（Windows）
 
-当前版本：**0.4.7**。基于 Electron 的 Holocubic 桌面控制台。
+当前版本：**1.0.0**。基于 Electron 的 Holocubic 桌面控制台。
 
 ## 下载与使用
 
-从 [Releases](https://github.com/ClocTeck-Jie/holocubic-pc-station/releases/latest) 下载 `holocubic-console-v0.4.7-win-x64.zip`，完整解压后打开文件夹中的 **holocubic控制台.exe**。请保留旁边的 DLL、locales 和 resources 文件夹。
+从 [Releases](https://github.com/ClocTeck-Jie/holocubic-pc-station/releases/latest) 下载 `holocubic-console-v1.0.0-win-x64.zip`，完整解压后打开文件夹中的 **holocubic控制台.exe**。请保留旁边的 DLL、locales 和 resources 文件夹。
 
 ## 功能
 
@@ -18,13 +18,13 @@
 
 ## 更新
 
-完整程序包适合首次安装。`holocubic-update-0.4.7.zip` 是控制台应用更新包，不包含 Electron 运行时。
+完整程序包适合首次安装。`holocubic-update-1.0.0.zip` 是控制台应用更新包，不包含 Electron 运行时。
 可在软件更新设置中使用清单地址：
 `https://github.com/ClocTeck-Jie/holocubic-pc-station/releases/latest/download/latest.json`
 
 ## 源码和构建
 
-当前实现位于 `src/Holocubic.Console`；原 WPF 实现保留在 `src/Clocteck.CubicCenter`，旧说明见 [历史说明](docs/legacy-pc-station.md)。
+控制台源码位于 `src/Holocubic.Console`；音乐桥接服务源码位于 `src/SmtcBridgeRust`。
 
 Windows 构建需要 Electron 43.6.0（win32-x64）、.NET 10 SDK 和 Rust MSVC 工具链：
 
@@ -35,10 +35,6 @@ Windows 构建需要 Electron 43.6.0（win32-x64）、.NET 10 SDK 和 Rust MSVC 
 5. 将运行时 `electron.exe` 重命名为 `holocubic控制台.exe` 并启动。应用图标可在打包时使用 `resources/app/assets/app.ico`。
 
 仓库不提交运行时和编译后二进制；这些包含在 Release 完整包中。
-
-## 已知问题
-
-360 曾对内置 `smtc-bridge.exe` 报告 `HEUR/QVM202.0.F926.Malware.Gen`。目前尚未获得 360 的核验结果，本版仍包含该组件，并未宣称已解决该检测。不要通过关闭安全防护绕过提示。
 
 ## 许可
 
