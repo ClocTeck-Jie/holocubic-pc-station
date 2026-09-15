@@ -76,7 +76,7 @@ async function openAppWindow({route,title,id,address=prefs.active},service=false
  popup.webContents.on('will-navigate',(e,url)=>{if(!webUrl(url))e.preventDefault()});
  popup.webContents.on('will-redirect',(e,url)=>{if(!webUrl(url))e.preventDefault()});
  popup.webContents.on('before-input-event',(e,input)=>{if(input.type!=='keyDown')return;const history=popup.webContents.navigationHistory;if(input.key==='F5'){e.preventDefault();popup.webContents.reload()}else if(input.alt&&input.key==='ArrowLeft'&&history.canGoBack()){e.preventDefault();history.goBack()}else if(input.alt&&input.key==='ArrowRight'&&history.canGoForward()){e.preventDefault();history.goForward()}});
- popup.on('closed',()=>appWindows.delete(key));popup.once('ready-to-show',()=>{popup.show();popup.focus()});
+ popup.on('closed',()=>{appWindows.delete(key);deviceChanged()});popup.once('ready-to-show',()=>{popup.show();popup.focus()});
  try{await popup.loadURL(url.href);popup.show();popup.focus();return true}catch(e){popup.close();throw Error('应用控制窗口打开失败：'+e.message)}
 }
 async function stagePackage(file){const result=await nativeCall('stage-update',{path:file,current:__dirname,version:app.getVersion()});stagedUpdate=result;log('更新包已就绪 v'+result.version);return {version:result.version}}
@@ -90,16 +90,29 @@ const serialMonitor=new SerialMonitor({nativeCall,prefs:()=>prefs,savePrefs,emit
 async function openSerial(data){return serialMonitor.open(data)}
 function addDiscovered(found){let changed=false;for(const d of found){const existing=prefs.devices.find(x=>x.ip===d.ip);if(existing){existing.online=true;existing.lastSeen=Date.now();}else{prefs.devices.push({ip:d.ip,name:d.name,online:true,lastSeen:Date.now()});changed=true}}if(changed){savePrefs();emit('devices',prefs)}return changed}
 const serialWifi=new SerialWifi({nativeCall,open:openSerial,close:()=>serialMonitor.closePort(),status:()=>serial,emit,onConnected:async address=>{const d=await device.probe(address,5000);addDiscovered([d]);await serialMonitor.bind(d.ip);emit('serial-wifi-device',{ip:d.ip});}});
-let companionPollBusy=false,companionTimer;
-async function pollCompanion(){if(companionPollBusy||!prefs.active||prefs.autoCompanion===false)return;companionPollBusy=true;try{const address=prefs.active,s=await device.request(address);if(address===prefs.active)await companions.observe(address,s)}catch{}finally{companionPollBusy=false}}
+let companionTimer;
+const {DeviceSync}=require('./device-sync.cjs');
+const deviceSync=new DeviceSync({request:device.request,publish:value=>{if(value.address!==prefs.active)return;emit('device-state',value);if(value.online&&prefs.autoCompanion!==false)companions.observe(value.address,value.system).catch(()=>{});}});
+async function pollCompanion(){if(prefs.active)await deviceSync.refresh(prefs.active).catch(()=>{});}
+function deviceChanged(){deviceSync.invalidate(prefs.active);iconCache.clear();emit('device-invalidated',{address:prefs.active});pollCompanion();}
 const browserLayout=createBrowserBackdrop({getView:()=>view,isVisible:()=>remoteVisible,setVisible:visible=>{remoteVisible=visible;sizeView()},setBounds:bounds=>{viewBounds=Object.fromEntries(Object.entries(bounds).map(([k,v])=>[k,Math.round(v)]))},emit});
 const handlers={
  ...fileModule.handlers,
+ deviceSnapshot:({address=prefs.active})=>deviceSync.refresh(address),
+ deviceSettingsApplied:async({address,language})=>{
+  const host=device.host(address);if(!['zh-CN','zh-TW','en','ja'].includes(language))throw Error('设备语言无效');
+  const saved=await device.request(host,'/api/system/fs/file?path=%2Fsd%2Fapps%2Fsettings.json');
+  if(saved?.language!==language)throw Error('设备语言保存校验失败，请重试');
+  const script=`(()=>{const language=${JSON.stringify(language)};localStorage.setItem('cubic.mainpage.language',language);const select=document.querySelector('[data-language-select]');if(select){select.value=language;select.dispatchEvent(new Event('change',{bubbles:true}));}})()`;
+  const contents=[view?.webContents,...[...appWindows.values()].filter(w=>!w.isDestroyed()).map(w=>w.webContents)];
+  for(const wc of contents){if(!wc||wc.isDestroyed())continue;const url=new URL(wc.getURL()||'about:blank');if(url.origin==='http://'+host&&url.pathname==='/main')await wc.executeJavaScript(script);}
+  return {launcherRefreshed:false};
+ },
  setUiLanguage:({language})=>{if(!uiLanguages.includes(language))throw Error('Unsupported language');prefs.uiLanguage=language;savePrefs();emit('ui-language',language);fileModule.setLanguage(language);return language;},
  renameDevice:({ip,name})=>{const d=prefs.devices.find(x=>x.ip===ip);if(!d)throw Error('设备不存在');name=String(name||'').trim();if(!name||name.length>50)throw Error('设备名称不能为空且不能超过 50 个字符');d.name=name;savePrefs();emit('devices',prefs);return prefs;},
  init:()=>({prefs,version:app.getVersion(),logPath:logFile}),
- api:async({route,method='GET',body,address=prefs.active})=>{try{const r=await device.request(address,route,method,body);if(method!=='GET')log(method+' '+route.split('?')[0]+' 成功');if(route==='/api/system/state'&&address===prefs.active)companions.observe(address,r).catch(e=>log(e.message));return r}catch(e){log(method+' '+route.split('?')[0]+' 失败：'+e.message);throw e}},
- appIcons:async({apps,address=prefs.active})=>{const list=Array.isArray(apps)?apps.slice(0,100):[],result={};for(let i=0;i<list.length;i+=3){await Promise.all(list.slice(i,i+3).map(async a=>{const key=address+'|'+a.id+'|'+a.version;let entry=iconCache.get(key);if(!entry||Date.now()-entry.time>300000){entry={value:await device.appIcon(address,a.id),time:Date.now()};iconCache.set(key,entry)}result[a.id]=entry.value}))}return result},
+ api:async({route,method='GET',body,address=prefs.active})=>{try{const r=route==='/api/system/state'&&method==='GET'?(await deviceSync.refresh(address)).system:await device.request(address,route,method,body);if(method!=='GET'){log(method+' '+route.split('?')[0]+' 成功');if(address===prefs.active)deviceChanged();}return r}catch(e){log(method+' '+route.split('?')[0]+' 失败：'+e.message);throw e}},
+ appIcons:async({apps,address=prefs.active,force=false})=>{const list=Array.isArray(apps)?apps.slice(0,100):[],result={};for(let i=0;i<list.length;i+=3){await Promise.all(list.slice(i,i+3).map(async a=>{const key=address+'|'+a.id+'|'+a.version;let entry=iconCache.get(key);if(force||!entry?.value||Date.now()-entry.time>60000){entry={value:await device.appIcon(address,a.id),time:Date.now()};iconCache.set(key,entry)}result[a.id]=entry.value}))}return result},
  prepareApp:({id,address=prefs.active})=>companions.prepare(address,id),
  configureCompanion:async({address=prefs.active})=>{const s=await device.request(address);await companions.observe(address,s,true);return true},
  probe:({ip})=>device.probe(ip,3500),
@@ -165,6 +178,8 @@ if(!app.requestSingleInstanceLock())app.quit();else{
   win.webContents.on('render-process-gone',(_e,d)=>log('主界面异常 '+JSON.stringify(d)));win.webContents.on('did-finish-load',()=>log('主界面加载完成'));
   win.loadFile(path.join(__dirname,'index.html'));win.once('ready-to-show',()=>{win.show();win.focus()});
   aiAccount.start();if(prefs.holopetLocalSync!==false)aiLocalMonitor.start();serialMonitor.start();companions.autoStart().catch(e=>log(e.message));companionTimer=setInterval(pollCompanion,4500);
+  win.on('focus',()=>{emit('device-refresh-needed',{});pollCompanion()});
+  session.fromPartition('persist:device-browser').webRequest.onCompleted(details=>{try{const u=new URL(details.url);if(u.host===prefs.active&&details.method!=='GET'&&details.statusCode>=200&&details.statusCode<300){clearTimeout(deviceChanged.timer);deviceChanged.timer=setTimeout(deviceChanged,500);}}catch{}});
   let closingFiles=false,closeConfirmed=false;win.on('close',e=>{if(closeConfirmed||!fileModule.hasPending())return;e.preventDefault();if(closingFiles)return;closingFiles=true;fileModule.confirmClose().then(ok=>{closingFiles=false;if(ok){closeConfirmed=true;win.close();}});});
   win.on('resize',sizeView);win.on('maximize',()=>emit('maximized',true));win.on('unmaximize',()=>emit('maximized',false));
   win.on('closed',()=>{for(const popup of appWindows.values())if(!popup.isDestroyed())popup.destroy();if(view&&!view.webContents.isDestroyed())view.webContents.close();view=null;win=null});
